@@ -1,66 +1,64 @@
-# Prototype validation
+# Rusty Note 0.2 preview validation
 
-## Build / tests actually run
+## Actually checked
 
-- `cargo test`: 5 passing unit tests (mixed Markdown, UTF-8 BOM heading,
-  prepared-layout cache, animation stop/reduced motion, malformed state defaults).
-- `cargo clippy --all-targets -- -D warnings`: passed.
-- `cargo build --release`: passed, executable about 816 KiB.
-- Active Rust LSP/structural diagnostics: changed native path confirmed without errors.
-- `scripts/validate.ps1`: passed on the real Windows Release binary.
+- Cargo format check, tests, Clippy with warnings denied and x64 Release build.
+- Unit tests cover mixed Markdown, BOM headings, cached Pretext resize, stopping
+  motion/reduced motion, malformed state, backup/conflict saves, no-overwrite new
+  files and preserving CRLF without marking an unchanged editor dirty.
+- Real native GUI `scripts/validate.ps1`: dark/light, 600x760 and 360x640, scrolling,
+  library and note changes, measurements unchanged on resize, no idle paint growth,
+  native editor text replacement/Save/backup/read mode and New note creation.
+- Active changed-path Rust diagnostics reported no errors before final packaging.
+- CI baseline passed publicly; the release workflow checks/tests/builds again.
 
-## Native GUI checks
+Only fixture copies under `target/validation/notes` are edited. Original fixtures
+and user notes are not touched by the harness. Captures target owned HWNDs only,
+never the desktop. Native source-editor captures were inspected in both themes.
 
-Two isolated notes were copied from runnable Markdown fixtures into
-`target/validation/notes`; user notes/global state were not used. Dark/light
-windows were rendered at 600x760 and 360x640, scrolled, shown with the library,
-and switched via keyboard. Actual owned-HWND captures were inspected; no desktop
-or other application pixels were captured.
+A local small-fixture sample after editor integration: ~42 MiB working set,
+~57–58 MiB private bytes, no reported CPU-time increase over 2.5 s idle and no
+additional paints. This is short Windows accounting, not zero-CPU/memory guarantees,
+GPU/full-system accounting, long-document profiling or a Tinta comparison.
 
-The fixtures combine headings, lists/tasks, quotes, code, table content,
-emphasis/link text, Korean and emoji. Inline style semantics/grid tables are not
-claimed: the prototype retains their text as block content.
+## Bugs caught / fixes
 
-Checks verified:
+- UTF-8 BOM could turn a heading into plain text; parser strips it and tests cover it.
+- PowerShell literal fixture encoding damaged Korean; copy UTF-8 fixture files as bytes.
+- Narrow library badge/title overlap; hide the decorative badge when space is short.
+- Undefined WM_MOUSELEAVE could be a Rust match wildcard; explicit message constant.
+- Win32 unsafe operations now have explicit scopes; no file-wide unsafe-op exemption.
+- Mouse movement caused redundant repaints; repaint only when the hover region changes.
+- Cross-process EDIT tests must use WM_SETTEXT, not SetWindowText caption semantics.
+- Windows editor input needs CRLF. Normalize the displayed buffer and preserve the
+  original file's CRLF when saving; untouched CRLF files are not falsely dirty.
 
-- initial motion settles;
-- native font-measurement count does not increase on resize;
-- selecting another note changes the selection and starts/finishes the animation;
-- no idle paint-count growth over 2.5 seconds;
-- process CPU and working set/private bytes sampled on the owned process;
-- state written outside source notes and owned process closes cleanly.
+## Source safety
 
-Actual last local results:
+Save is explicit. Native selection/undo/clipboard/IME come from Windows EDIT.
+Save compares the disk text with the original, blocks detected external changes,
+writes a sibling `.md.bak`, syncs a new temporary file and replaces the note.
+Failing saves keep the editor/buffer. New files use create_new and cannot overwrite
+an existing Note-NNN.md. Closing/leaving dirty editing asks Save/Discard/Cancel.
 
-| Theme | Working set MiB | Private MiB | CPU ms / 2500 ms idle | Additional idle paints |
-| --- | ---: | ---: | ---: | ---: |
-| Dark | 41.84 | 58.08 | 0 | 0 |
-| Light | 41.89 | 56.72 | 0 | 0 |
+The conflict check is optimistic, not a filesystem transaction: writes between
+comparison and replacement remain a race. Multiple editors/instances and exotic
+filesystems still need stress testing. Backups are one previous version, not a
+history database. No automatic source save or deletion was added.
 
-A 0 ms sample is limited by Windows accounting granularity; it is not proof of
-zero CPU at every instant. GPU memory/full-system memory, large files, multiple
-instances and live multi-monitor DPI migration were not profiled.
+## Distribution
 
-## Findings fixed while inspecting captures
+Public repository: https://github.com/mud-the-developer/rusty-note
+Version-tag workflow builds portable Windows x64 zip + SHA256SUMS and a pre-release.
+No installer/association/autostart change or signing certificate is used. The
+binary is unsigned and SmartScreen may warn. Release notes must state preview status.
 
-- A generated PowerShell fixture originally had an encoding/BOM problem, turning
-  the heading into plain text and damaging Korean. Fixtures are now source files
-  copied as bytes; the parser strips a leading UTF-8 BOM. A regression test was added.
-- The decorative NATIVE CANVAS badge overlapped the title in a narrow library
-  layout. It now hides when insufficient space remains; corrected images inspected.
-- An unresolved WM_MOUSELEAVE identifier could become a Rust match wildcard.
-  The message is explicit (0x02a3); actual native smoke/GUI checks catch message-loop errors.
-- Unsafe Win32 operations now have explicit unsafe scopes, not a file-wide
-  unsafe-op lint exemption. Win32 ownership/reentrancy still needs ongoing review.
+## Still incomplete
 
-Artifacts (ignored): `target/validation/{dark,light}-*.png`, `*-profile.json`,
-`*-metrics.json`, isolated state files and copied notes.
+Rich inline styling/clickable links, proper grid tables, images, tray, folder
+watching, system reduced-motion detection, live DPI migration and full Tinta parity.
+The source editor is a native plain-text Markdown editor. Native Direct2D animations
+are bounded redraws, not retained DirectComposition surfaces yet.
 
-## Current limitations
-
-This is a working rendering/performance prototype, not the finished fancy note
-product. No editor/undo/save, tray, directory watcher, images, clickable links,
-rich inline runs, native grid tables or Tinta compatibility guarantee yet.
-Animations are bounded Direct2D redraws, not retained compositor animations.
-The next optimization is cached card surfaces + DirectComposition transitions.
-The Pretext dependency is a third-party Rust port, not the official JS package.
+Artifacts: ignored `target/validation/*-{wide,narrow,bottom,library,editor}.png`,
+profile/metrics JSON, state and fixture copies. No user-note contents are published.

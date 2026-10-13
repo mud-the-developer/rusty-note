@@ -24,6 +24,8 @@ public static class NoteProbe {
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h,IntPtr a,int x,int y,int w,int z,uint f);
     [DllImport("user32.dll")] public static extern IntPtr SendMessageW(IntPtr h,uint m,IntPtr w,IntPtr l);
     [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h,uint m,IntPtr w,IntPtr l);
+    [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr h,int id);
+    [DllImport("user32.dll",CharSet=CharSet.Unicode,EntryPoint="SendMessageW")] public static extern IntPtr SetText(IntPtr h,uint m,IntPtr w,string text);
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h,IntPtr dc,uint f);
     [DllImport("user32.dll")] public static extern bool RedrawWindow(IntPtr h,IntPtr r,IntPtr g,uint f);
     public static IntPtr Find(int pid) {IntPtr found=IntPtr.Zero; EnumWindows((h,p)=>{uint owner;GetWindowThreadProcessId(h,out owner);if(owner!=(uint)pid)return true;var s=new StringBuilder(128);GetClassNameW(h,s,128);if(s.ToString()!="RustyNote.Native")return true;found=h;return false;},IntPtr.Zero);return found;}
@@ -92,6 +94,22 @@ foreach($theme in @('dark','light')) {
         $report=[PSCustomObject]@{theme=$theme;idle_cpu_ms=$cpuDelta;interval_ms=2500;working_set_mib=[math]::Round($p.WorkingSet64/1MB,2);private_mib=[math]::Round($p.PrivateMemorySize64/1MB,2);paint_count=$idleAfter.paint_count;font_measurements=$idleAfter.font_measurements;animation_active=$idleAfter.animation_active}
         $report|ConvertTo-Json|Set-Content (Join-Path $out "$theme-profile.json")
         $report|Format-List
+        $null=[NoteProbe]::SendMessageW($hwnd,0x111,[IntPtr]200,[IntPtr]::Zero)
+        $editor=[NoteProbe]::GetDlgItem($hwnd,100)
+        if($editor -eq [IntPtr]::Zero){throw 'Native editor did not open'}
+        $edited="# Edited fixture`r`n`r`nSaved by the isolated native editor test."
+        $null=[NoteProbe]::SetText($editor,0x0c,[IntPtr]::Zero,$edited)
+        Capture $hwnd (Join-Path $out "$theme-editor.png")
+        $null=[NoteProbe]::SendMessageW($hwnd,0x111,[IntPtr]201,[IntPtr]::Zero)
+        $path=Join-Path $notes ($after.selected+'.md')
+        if(![IO.File]::ReadAllText($path).StartsWith('# Edited fixture')){throw 'Native Save failed'}
+        if(!(Test-Path -LiteralPath ($path+'.bak'))){throw 'Save backup missing'}
+        $null=[NoteProbe]::SendMessageW($hwnd,0x111,[IntPtr]203,[IntPtr]::Zero)
+        if([NoteProbe]::GetDlgItem($hwnd,100) -ne [IntPtr]::Zero){throw 'Reading mode did not return'}
+        $null=[NoteProbe]::SendMessageW($hwnd,0x111,[IntPtr]202,[IntPtr]::Zero)
+        $created=[NoteProbe]::GetDlgItem($hwnd,100)
+        if($created -eq [IntPtr]::Zero){throw 'New note did not start editing'}
+        $null=[NoteProbe]::SendMessageW($hwnd,0x111,[IntPtr]203,[IntPtr]::Zero)
     }finally{
         if(!$p.HasExited){$null=[NoteProbe]::PostMessageW([NoteProbe]::Find($p.Id),0x10,[IntPtr]::Zero,[IntPtr]::Zero);if(!$p.WaitForExit(10000)){Stop-Process -Id $p.Id -Force;throw 'Owned app did not close'}}
     }

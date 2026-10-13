@@ -13,7 +13,7 @@ stack is pulled in. Direct2D manages the native rendering target.
 
 ## Data flow
 
-1. Read bounded Markdown from the chosen notes directory, never mutate it.
+1. Read bounded Markdown from the chosen notes directory. Mutate only after an explicit native-editor Save, with source conflict checking and backups.
 2. `pulldown-cmark` emits block content/kinds (heading, list/task, quote, code, table row).
 3. Configure a native font per block. `TextMeasure` delegates to actual DirectWrite
    text layout metrics, including Windows font fallback.
@@ -39,7 +39,7 @@ reducing active CPU work without redoing text layout. Idle remains event-driven.
 - Rich inline runs with correct styled advance measurement, code whitespace and grid tables.
 - Prepared line/surface reuse across transitions and a bounded cache for recently viewed notes.
 - Compositor-driven card/rail transitions and reduced-motion system preference.
-- Native edit/undo/save flow with source integrity tests, tray and directory notifications.
+- Extend the implemented native Unicode edit/undo/save flow; tray and directory notifications remain future work.
 - Long-document, multi-monitor DPI, GPU-memory and multi-note-instance profiling.
 
 These are design directions, not implemented features. First establish a reliable

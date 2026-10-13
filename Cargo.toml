@@ -1,11 +1,11 @@
 [package]
 name = "rusty-note"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Native Windows Markdown sticky notes with cached Pretext layout"
 license = "MIT"
 repository = "https://github.com/mud-the-developer/rusty-note"
-rust-version = "1.88"
+rust-version = "1.99"
 
 [dependencies]
 gpui-pretext = "=0.6.2"

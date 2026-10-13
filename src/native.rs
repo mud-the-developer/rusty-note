@@ -164,6 +164,7 @@ struct App {
     scroll: f32,
     paints: u64,
     error: Option<String>,
+    editor: Option<crate::editor::Editor>,
 }
 impl App {
     unsafe fn new(options: Options) -> Result<Self> {
@@ -215,6 +216,7 @@ impl App {
                 scale: 1.0,
                 scroll: 0.0,
                 paints: 0,
+                editor: None,
                 error,
             })
         }
@@ -255,6 +257,29 @@ impl App {
             Ok(())
         }
     }
+    fn hover_region(&self, (x, y): (f32, f32)) -> i32 {
+        if y < 43.0 {
+            for (i, left) in [
+                12.0,
+                48.0,
+                86.0,
+                self.width - 114.0,
+                self.width - 78.0,
+                self.width - 42.0,
+            ]
+            .iter()
+            .enumerate()
+            {
+                if x >= *left && x < *left + 30.0 {
+                    return i as i32;
+                }
+            }
+        }
+        if self.library && x < 158.0 && y >= 112.0 {
+            return 100 + ((y - 112.0) / 48.0) as i32;
+        }
+        -1
+    }
     fn content_x(&self) -> f32 {
         if self.library { 178.0 } else { 28.0 }
     }
@@ -288,7 +313,7 @@ impl App {
     }
     unsafe fn select(&mut self, index: usize) {
         unsafe {
-            if index >= self.notes.len() {
+            if index >= self.notes.len() || !self.finish_edit() {
                 return;
             }
             match fs::read_to_string(&self.notes[index].path) {
@@ -399,9 +424,9 @@ impl App {
             );
             self.fill(rect(30.0, 48.0, 38.0, 3.0), 1.5, palette.accent, 0.85);
             self.text(
-                "RUSTY / NOTE",
+                "RUSTY NOTE",
                 tiny,
-                rect(55.0, 17.0, 190.0, 20.0),
+                rect(126.0, 17.0, (self.width - 246.0).max(0.0), 20.0),
                 palette.muted,
                 1.0,
             )?;
@@ -435,6 +460,12 @@ impl App {
             }
             for (x, text, on) in [
                 (12.0, "≡", self.library),
+                (
+                    48.0,
+                    if self.editor.is_some() { "✓" } else { "✎" },
+                    self.editor.is_some(),
+                ),
+                (86.0, "+", false),
                 (self.width - 114.0, "P", self.state.pinned),
                 (self.width - 78.0, "◐", self.state.light),
                 (self.width - 42.0, "×", false),
@@ -600,13 +631,122 @@ impl App {
             result
         }
     }
+    fn start_edit(&mut self) {
+        if self.editor.is_some() {
+            return;
+        }
+        let Some(note) = self.notes.get(self.selected) else {
+            return;
+        };
+        match crate::editor::Editor::open(
+            self.hwnd,
+            &note.path,
+            self.width,
+            self.height,
+            self.scale,
+        ) {
+            Ok(editor) => {
+                self.library = false;
+                self.editor = Some(editor);
+                self.error = None;
+            }
+            Err(error) => self.error = Some(error.to_string()),
+        }
+        unsafe {
+            let _ = InvalidateRect(Some(self.hwnd), None, false);
+        }
+    }
+    fn save_edit(&mut self) -> bool {
+        let Some(editor) = self.editor.as_mut() else {
+            return true;
+        };
+        match editor.save() {
+            Ok(()) => {
+                self.scene = Scene::new(&Document::parse(&editor.buffer.text), &self.fonts);
+                self.reflow();
+                self.error = None;
+                true
+            }
+            Err(error) => {
+                self.error = Some(error.to_string());
+                unsafe {
+                    MessageBoxW(
+                        Some(self.hwnd),
+                        PCWSTR(
+                            error
+                                .to_string()
+                                .encode_utf16()
+                                .chain([0])
+                                .collect::<Vec<_>>()
+                                .as_ptr(),
+                        ),
+                        w!("Save blocked"),
+                        MB_OK | MB_ICONWARNING,
+                    );
+                };
+                false
+            }
+        }
+    }
+    fn finish_edit(&mut self) -> bool {
+        if let Some(editor) = self.editor.as_mut() {
+            editor.sync();
+            if editor.buffer.dirty() {
+                let answer = unsafe {
+                    MessageBoxW(
+                        Some(self.hwnd),
+                        w!("Save changes before leaving this note?"),
+                        w!("Rusty Note"),
+                        MB_YESNOCANCEL | MB_ICONQUESTION,
+                    )
+                };
+                if answer == IDCANCEL {
+                    return false;
+                }
+                if answer == IDYES && !self.save_edit() {
+                    return false;
+                }
+            }
+        }
+        self.editor = None;
+        true
+    }
+    fn new_note(&mut self) {
+        if !self.finish_edit() {
+            return;
+        }
+        match crate::edit::create_note(&self.options.notes_dir) {
+            Ok(path) => {
+                self.notes = store::list_notes(&self.options.notes_dir).unwrap_or_default();
+                if let Some(index) = self.notes.iter().position(|n| n.path == path) {
+                    unsafe { self.select(index) };
+                    self.start_edit();
+                }
+            }
+            Err(error) => self.error = Some(error.to_string()),
+        }
+    }
     unsafe fn click(&mut self, x: f32, y: f32) {
         unsafe {
             if y < 43.0 {
                 if x < 44.0 {
+                    if !self.finish_edit() {
+                        return;
+                    }
                     self.library = !self.library;
                     self.reflow();
                     self.animate();
+                } else if (48.0..78.0).contains(&x) {
+                    if self.editor.is_some() {
+                        if self.save_edit() {
+                            self.editor = None;
+                            self.animate();
+                        }
+                    } else {
+                        self.start_edit();
+                    }
+                } else if (86.0..116.0).contains(&x) {
+                    self.new_note();
                 } else if x > self.width - 42.0 {
                     let _ = PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
                 } else if x > self.width - 78.0 {
@@ -683,6 +823,9 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                         app.target = None;
                         app.brush = None;
                     }
+                    if let Some(editor) = &app.editor {
+                        editor.resize(app.width, app.height, app.scale);
+                    }
                     app.reflow();
                     let _ = InvalidateRect(Some(hwnd), None, false);
                 }
@@ -733,7 +876,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                     HTLEFT
                 } else if x > right - 6.0 {
                     HTRIGHT
-                } else if y < 45.0 && x > 48.0 && x < right - 118.0 {
+                } else if y < 45.0 && x > 120.0 && x < right - 118.0 {
                     HTCAPTION
                 } else {
                     HTCLIENT
@@ -749,6 +892,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                 LRESULT(0)
             }
             WM_MOUSEMOVE => {
+                let old_region = app.hover_region(app.hover);
                 app.hover = (
                     (l.0 as u32 & 0xffff) as i16 as f32 / app.scale,
                     ((l.0 as u32 >> 16) & 0xffff) as i16 as f32 / app.scale,
@@ -760,13 +904,18 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                     dwHoverTime: 0,
                 };
                 let _ = TrackMouseEvent(&track as *const _ as *mut _);
-                let _ = InvalidateRect(Some(hwnd), None, false);
+                if old_region != app.hover_region(app.hover) {
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
                 LRESULT(0)
             }
             0x02a3 => {
                 // WM_MOUSELEAVE (not a wildcard pattern)
+                let old_region = app.hover_region(app.hover);
                 app.hover = (-1.0, -1.0);
-                let _ = InvalidateRect(Some(hwnd), None, false);
+                if old_region != -1 {
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
@@ -851,11 +1000,27 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                 }
                 LRESULT(0)
             }
+            WM_COMMAND => {
+                if w.0 & 0xffff == 200 {
+                    app.start_edit();
+                } else if w.0 & 0xffff == 201 {
+                    app.save_edit();
+                } else if w.0 & 0xffff == 202 {
+                    app.new_note();
+                } else if w.0 & 0xffff == 203 && app.finish_edit() {
+                    app.animate();
+                }
+                let _ = InvalidateRect(Some(hwnd), None, false);
+                LRESULT(0)
+            }
             WM_EXITSIZEMOVE => {
                 app.persist();
                 LRESULT(0)
             }
             WM_CLOSE => {
+                if !app.finish_edit() {
+                    return LRESULT(0);
+                }
                 app.persist();
                 drop(app);
                 let _ = DestroyWindow(hwnd);
@@ -963,6 +1128,19 @@ pub fn run(options: Options) -> Result<()> {
             let result = GetMessageW(&mut message, None, 0, 0);
             if result.0 <= 0 {
                 break;
+            }
+            if message.message == WM_KEYDOWN && GetKeyState(0x11) < 0 {
+                let command = match message.wParam.0 {
+                    0x45 => Some(200),
+                    0x53 => Some(201),
+                    0x4e => Some(202),
+                    0x0d => Some(203),
+                    _ => None,
+                };
+                if let Some(command) = command {
+                    SendMessageW(hwnd, WM_COMMAND, Some(WPARAM(command)), None);
+                    continue;
+                }
             }
             let _ = TranslateMessage(&message);
             DispatchMessageW(&message);
