@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.2 — reference-informed viewer polish
+
+- Used pinned REA to inspect two public reference app structures; documented source findings,
+  license restrictions, static-analysis limits and independent adaptations.
+- Native Unicode file-drop opening; reject multiple files without changing the selection.
+- Preserve/clamp reading position across external refresh and F5.
+- Ignore unchanged Markdown folder notifications without reparsing/measuring fonts;
+  changed cached local images still invalidate.
+- Fit off-screen/oversized saved geometry to the work area with initial monitor DPI;
+  recover after display changes and clear device-bound image caches on DPI change.
+- Fixed sent-message starvation of the directory-handle wait, using PeekMessage without polling.
+- Regression checks for Unicode shell payloads, reload position and negative/small monitor geometry;
+  native copied-fixture checks in normal/narrow light/dark windows.
+- No reference runtime/code/assets copied; source Markdown remains read-only.
+
 ## 0.3.1 — simple Markdown sticker
 
 - Default to a small read-only MD viewer, not a note-management/editor UI.

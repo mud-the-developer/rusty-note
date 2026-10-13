@@ -30,6 +30,11 @@ fn main() {
                     args.next().expect("--smoke-output needs a path"),
                 ))
             }
+            "--smoke-drop-file" => {
+                options.smoke_drop_file = Some(PathBuf::from(
+                    args.next().expect("--smoke-drop-file needs a path"),
+                ))
+            }
             "--metrics-file" => {
                 options.metrics_file = Some(PathBuf::from(
                     args.next().expect("--metrics-file needs a path"),

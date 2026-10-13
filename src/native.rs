@@ -38,6 +38,7 @@ pub struct Options {
     pub explicit_notes_dir: bool,
     pub editor_mode: bool,
     pub file: Option<PathBuf>,
+    pub smoke_drop_file: Option<PathBuf>,
 }
 
 struct Fonts {
@@ -172,6 +173,7 @@ struct App {
     images: crate::images::Images,
     library_scroll: usize,
     tray_available: bool,
+    viewer_source: Option<String>,
 }
 impl App {
     unsafe fn new(mut options: Options) -> Result<Self> {
@@ -226,7 +228,8 @@ impl App {
                 .and_then(|path| notes.iter().position(|n| &n.path == path))
                 .unwrap_or(0);
             let source = notes.get(selected).and_then(|note| crate::edit::read_note(&note.path).ok())
-            .unwrap_or_else(|| "# Markdown sticker\n\nClick Open or press Ctrl+O to choose a .md file.\n\nDrag the header to place this small window. P keeps it above other windows.\n\nThe original Markdown is read-only.".into());
+            .unwrap_or_else(|| "# Markdown sticker\n\nDrop one .md file here, or press Ctrl+O to open it.\n\nDrag the header to place this small window. P keeps it above other windows.\n\nThe original Markdown is read-only.".into());
+            let viewer_source = (!options.editor_mode).then(|| source.clone());
             let mut scene = Scene::new(&Document::parse(&source), &fonts);
             scene.reflow(state.width as f32 - 72.0);
             let mut motion = Motion::default();
@@ -254,6 +257,7 @@ impl App {
                 images: crate::images::Images::new()?,
                 library_scroll: 0,
                 tray_available: false,
+                viewer_source,
                 error,
             })
         }
@@ -855,17 +859,34 @@ impl App {
             result
         }
     }
-    fn open_markdown(&mut self, path: PathBuf) {
+    fn open_markdown(&mut self, path: PathBuf, explicit_open: bool) {
         match crate::viewer::open(&path) {
             Ok((note, text)) => {
+                let same_file = self.options.file.as_ref() == Some(&note.path);
+                let previous_scroll = if same_file { self.scroll } else { 0.0 };
+                if same_file && self.viewer_source.as_deref() == Some(text.as_str()) {
+                    let changed = self.images.refresh_changed();
+                    let cleared_error = explicit_open && self.error.take().is_some();
+                    if changed || cleared_error {
+                        unsafe {
+                            let _ = InvalidateRect(Some(self.hwnd), None, false);
+                        }
+                    }
+                    return;
+                }
+                self.viewer_source = Some(text.clone());
                 self.options.notes_dir = note.path.parent().unwrap().to_owned();
                 self.options.file = Some(note.path.clone());
                 self.notes = vec![note];
                 self.selected = 0;
-                self.scroll = 0.0;
                 self.images.clear();
                 self.scene = Scene::new(&Document::parse(&text), &self.fonts);
                 self.reflow();
+                self.scroll = crate::viewer::reload_scroll(
+                    previous_scroll,
+                    self.scene.height,
+                    self.height - 160.0,
+                );
                 self.error = None;
                 unsafe {
                     let title: Vec<u16> = format!("MD Sticker — {}", self.notes[0].title)
@@ -886,7 +907,7 @@ impl App {
     }
     fn choose_markdown(&mut self) {
         if let Some(path) = crate::desktop::choose_markdown(self.hwnd) {
-            self.open_markdown(path);
+            self.open_markdown(path, true);
         }
     }
     unsafe fn actions_menu(&self) {
@@ -1131,7 +1152,7 @@ impl App {
     fn refresh_notes(&mut self) {
         if !self.options.editor_mode {
             if let Some(path) = self.options.file.clone() {
-                self.open_markdown(path);
+                self.open_markdown(path, false);
             }
             return;
         }
@@ -1180,7 +1201,7 @@ impl App {
             "font_measurements":self.fonts.measurements.get(),"prepare_blocks":self.scene.prepare_passes,
             "layout_passes":self.scene.layout_passes,"paint_count":self.paints,"animation_active":self.motion.active(),
             "lines":self.scene.lines.len(),"width_dip":self.width,"height_dip":self.height,
-            "selected":self.notes.get(self.selected).map(|n| &n.title),"read_only":!self.options.editor_mode,"table_cells":self.scene.cells.len(),"images":self.scene.images.len(),"styled_runs":self.scene.lines.iter().map(|l|l.runs.iter().filter(|r|r.style.bold||r.style.italic||r.style.code||r.style.link.is_some()||r.style.strike).count()).sum::<usize>()})
+            "selected":self.notes.get(self.selected).map(|n| &n.title),"read_only":!self.options.editor_mode,"scroll":self.scroll,"error":self.error,"table_cells":self.scene.cells.len(),"images":self.scene.images.len(),"styled_runs":self.scene.lines.iter().map(|l|l.runs.iter().filter(|r|r.style.bold||r.style.italic||r.style.code||r.style.link.is_some()||r.style.strike).count()).sum::<usize>()})
     }
 }
 
@@ -1232,7 +1253,48 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                 }
                 LRESULT(0)
             }
+            0x8007
+                if app.options.metrics_file.is_some() && app.options.smoke_drop_file.is_some() =>
+            {
+                let path = app.options.smoke_drop_file.clone().unwrap();
+                let paths = if w.0 == 2 {
+                    vec![path.clone(), path]
+                } else {
+                    vec![path]
+                };
+                match crate::desktop::diagnostic_drop(&paths) {
+                    Ok(payload) => {
+                        drop(app);
+                        SendMessageW(hwnd, WM_DROPFILES, Some(WPARAM(payload.0 as usize)), None);
+                    }
+                    Err(error) => {
+                        app.error = Some(error.to_string());
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_DROPFILES => {
+                let dropped = crate::desktop::dropped_markdown(windows::Win32::UI::Shell::HDROP(
+                    w.0 as *mut _,
+                ));
+                if !app.options.editor_mode {
+                    match dropped {
+                        Ok(path) => app.open_markdown(path, true),
+                        Err(error) => {
+                            app.error = Some(error.to_string());
+                            let _ = InvalidateRect(Some(hwnd), None, false);
+                        }
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_DISPLAYCHANGE => {
+                drop(app);
+                crate::desktop::fit_window_to_work_area(hwnd);
+                LRESULT(0)
+            }
             WM_DPICHANGED => {
+                app.images.clear();
                 app.scale = (w.0 >> 16) as f32 / 96.0;
                 app.target = None;
                 app.brush = None;
@@ -1360,8 +1422,12 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                         let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(208), LPARAM(0));
                     }
                     0x74 => {
-                        let index = app.selected;
-                        app.select(index);
+                        if app.options.editor_mode {
+                            let index = app.selected;
+                            app.select(index);
+                        } else {
+                            app.refresh_notes();
+                        }
                     }
                     0x27 => {
                         let index = (app.selected + 1) % app.notes.len().max(1);
@@ -1589,12 +1655,28 @@ pub fn run(options: Options) -> Result<()> {
             ..Default::default()
         };
         if GetMonitorInfoW(monitor, &mut info).as_bool() {
-            position.left = state
-                .x
-                .clamp(info.rcWork.left, info.rcWork.right - state.width);
-            position.top = state
-                .y
-                .clamp(info.rcWork.top, info.rcWork.bottom - state.height);
+            let mut dpi_x = 96;
+            let mut dpi_y = 96;
+            let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y);
+            let scale = dpi_x as f32 / 96.0;
+            let fitted = crate::placement::Placement {
+                x: state.x,
+                y: state.y,
+                width: (state.width as f32 * scale).round() as i32,
+                height: (state.height as f32 * scale).round() as i32,
+            }
+            .fit(
+                info.rcWork.left,
+                info.rcWork.top,
+                info.rcWork.right,
+                info.rcWork.bottom,
+            );
+            position = RECT {
+                left: fitted.x,
+                top: fitted.y,
+                right: fitted.x + fitted.width,
+                bottom: fitted.y + fitted.height,
+            };
         }
         let hwnd = CreateWindowExW(
             if state.pinned {
@@ -1607,14 +1689,15 @@ pub fn run(options: Options) -> Result<()> {
             WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX,
             position.left,
             position.top,
-            state.width,
-            state.height,
+            position.right - position.left,
+            position.bottom - position.top,
             None,
             None,
             Some(HINSTANCE(instance.0)),
             None,
         )?;
         cell.borrow_mut().hwnd = hwnd;
+        windows::Win32::UI::Shell::DragAcceptFiles(hwnd, !cell.borrow().options.editor_mode);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(cell) as isize);
         let corner = DWMWCP_ROUND;
         let _ = DwmSetWindowAttribute(
@@ -1680,8 +1763,17 @@ pub fn run(options: Options) -> Result<()> {
                     continue;
                 }
             }
-            let result = GetMessageW(&mut message, None, 0, 0);
-            if result.0 <= 0 {
+            if watch.is_some() {
+                // A sent message can wake the wait without leaving a queued message.
+                // GetMessage would then block past directory notifications; Peek returns
+                // us to the native handle wait without an idle polling/render loop.
+                if !PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                    continue;
+                }
+                if message.message == WM_QUIT {
+                    break;
+                }
+            } else if GetMessageW(&mut message, None, 0, 0).0 <= 0 {
                 break;
             }
             if message.message == WM_KEYDOWN && GetKeyState(0x11) < 0 {

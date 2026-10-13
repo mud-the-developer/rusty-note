@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use windows::{
     Win32::{
         Foundation::*,
+        Graphics::Gdi::*,
         Storage::FileSystem::*,
         System::Com::CoTaskMemFree,
         UI::{Shell::*, WindowsAndMessaging::*},
@@ -85,6 +86,105 @@ impl Drop for Watch {
     fn drop(&mut self) {
         unsafe {
             let _ = FindCloseChangeNotification(self.handle);
+        }
+    }
+}
+/// Diagnostic payload creation in the receiving process: HGLOBAL is process-local.
+/// Used only with explicit native-validation options, never to inject another process.
+pub fn diagnostic_drop(files: &[PathBuf]) -> std::io::Result<HDROP> {
+    use windows::Win32::System::Memory::*;
+    let mut text = Vec::<u16>::new();
+    for path in files {
+        text.extend(path.to_string_lossy().encode_utf16());
+        text.push(0);
+    }
+    text.push(0);
+    if text.len() > 32768 {
+        return Err(std::io::Error::other("Drop payload exceeds test limit"));
+    }
+    unsafe {
+        let handle = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, 20 + text.len() * 2)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let pointer = GlobalLock(handle);
+        if pointer.is_null() {
+            let _ = GlobalFree(Some(handle));
+            return Err(std::io::Error::other("Could not lock diagnostic drop"));
+        }
+        let pointer = pointer as *mut u8;
+        std::ptr::write_unaligned(pointer as *mut u32, 20);
+        std::ptr::write_unaligned(pointer.add(16) as *mut u32, 1);
+        std::ptr::copy_nonoverlapping(text.as_ptr() as *const u8, pointer.add(20), text.len() * 2);
+        let _ = GlobalUnlock(handle);
+        Ok(HDROP(handle.0))
+    }
+}
+/// Consume exactly one Unicode file drop, always releasing the shell allocation.
+pub fn dropped_markdown(drop: HDROP) -> std::io::Result<PathBuf> {
+    unsafe {
+        let count = DragQueryFileW(drop, u32::MAX, None);
+        let result = if count != 1 {
+            Err(std::io::Error::other(
+                "Drop one Markdown (.md) file at a time",
+            ))
+        } else {
+            let length = DragQueryFileW(drop, 0, None);
+            if length == 0 || length > 32767 {
+                Err(std::io::Error::other(
+                    "Dropped filename is unavailable or too long",
+                ))
+            } else {
+                let mut text = vec![0u16; length as usize + 1];
+                let copied = DragQueryFileW(drop, 0, Some(&mut text));
+                String::from_utf16(&text[..copied as usize])
+                    .map(PathBuf::from)
+                    .map_err(|_| std::io::Error::other("Dropped filename is not valid Unicode"))
+            }
+        };
+        DragFinish(drop);
+        result
+    }
+}
+
+pub fn fit_window_to_work_area(hwnd: HWND) {
+    unsafe {
+        let mut r = RECT::default();
+        if GetWindowRect(hwnd, &mut r).is_err() {
+            return;
+        }
+        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return;
+        }
+        let fitted = crate::placement::Placement {
+            x: r.left,
+            y: r.top,
+            width: r.right - r.left,
+            height: r.bottom - r.top,
+        }
+        .fit(
+            info.rcWork.left,
+            info.rcWork.top,
+            info.rcWork.right,
+            info.rcWork.bottom,
+        );
+        if fitted.x != r.left
+            || fitted.y != r.top
+            || fitted.width != r.right - r.left
+            || fitted.height != r.bottom - r.top
+        {
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                fitted.x,
+                fitted.y,
+                fitted.width,
+                fitted.height,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
         }
     }
 }
@@ -176,6 +276,14 @@ pub fn choose_folder(hwnd: HWND) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shell_drop_decodes_unicode_and_rejects_multiple_files() {
+        let path = PathBuf::from("C:/fixture/한글 스티커.md");
+        let payload = diagnostic_drop(std::slice::from_ref(&path)).unwrap();
+        assert_eq!(dropped_markdown(payload).unwrap(), path);
+        let payload = diagnostic_drop(&[path.clone(), path]).unwrap();
+        assert!(dropped_markdown(payload).is_err());
+    }
     #[test]
     fn only_explicit_web_and_mail_schemes_are_opened() {
         assert!(safe_link("https://example.com"));

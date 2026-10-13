@@ -1,4 +1,8 @@
 //! Bounded local image decoding. Markdown cannot fetch remote resources.
+fn image_signature(path: &std::path::Path) -> Option<(u64, std::time::SystemTime)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.len(), meta.modified().ok()?))
+}
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -14,6 +18,7 @@ use windows::{
 pub struct Images {
     factory: IWICImagingFactory,
     cache: HashMap<PathBuf, Option<ID2D1Bitmap>>,
+    signatures: HashMap<PathBuf, Option<(u64, std::time::SystemTime)>>,
 }
 impl Images {
     pub fn new() -> Result<Self> {
@@ -21,11 +26,26 @@ impl Images {
             Ok(Self {
                 factory: CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?,
                 cache: HashMap::new(),
+                signatures: HashMap::new(),
             })
         }
     }
     pub fn clear(&mut self) {
         self.cache.clear();
+        self.signatures.clear();
+    }
+    pub fn refresh_changed(&mut self) -> bool {
+        let changed: Vec<_> = self
+            .signatures
+            .iter()
+            .filter(|(path, signature)| image_signature(path) != **signature)
+            .map(|(path, _)| path.clone())
+            .collect();
+        for path in &changed {
+            self.cache.remove(path);
+            self.signatures.remove(path);
+        }
+        !changed.is_empty()
     }
     pub fn load(
         &mut self,
@@ -83,6 +103,7 @@ impl Images {
             }
         })()
         .ok();
+        self.signatures.insert(path.clone(), image_signature(&path));
         self.cache.insert(path, bitmap.clone());
         bitmap
     }

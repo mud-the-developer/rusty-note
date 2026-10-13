@@ -5,6 +5,7 @@ pub mod editor;
 pub mod layout;
 pub mod motion;
 pub mod notes;
+pub mod placement;
 #[cfg(windows)]
 pub mod prompt;
 pub mod store;

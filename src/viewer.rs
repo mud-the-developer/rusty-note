@@ -28,6 +28,14 @@ pub fn open(path: &Path) -> io::Result<(Note, String)> {
         text,
     ))
 }
+pub fn reload_scroll(scroll: f32, document_height: f32, visible_height: f32) -> f32 {
+    let max = (document_height - visible_height).max(0.0);
+    if scroll.is_finite() {
+        scroll.clamp(0.0, max)
+    } else {
+        0.0
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -47,6 +55,13 @@ mod tests {
         }
         assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn reload_keeps_reading_position_but_clamps_shorter_documents() {
+        assert_eq!(reload_scroll(420.0, 1800.0, 400.0), 420.0);
+        assert_eq!(reload_scroll(420.0, 600.0, 400.0), 200.0);
+        assert_eq!(reload_scroll(420.0, 200.0, 400.0), 0.0);
+        assert_eq!(reload_scroll(f32::NAN, 800.0, 400.0), 0.0);
     }
     #[test]
     fn non_markdown_input_is_rejected() {
