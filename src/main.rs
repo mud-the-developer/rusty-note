@@ -19,7 +19,8 @@ fn main() {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--notes-dir" => {
-                options.notes_dir = PathBuf::from(args.next().expect("--notes-dir needs a path"))
+                options.notes_dir = PathBuf::from(args.next().expect("--notes-dir needs a path"));
+                options.explicit_notes_dir = true;
             }
             "--state-file" => {
                 options.state_file = PathBuf::from(args.next().expect("--state-file needs a path"))

@@ -25,6 +25,7 @@ use windows::{
     },
     core::{PCWSTR, Result, w},
 };
+use windows_numerics::Vector2;
 
 #[derive(Default)]
 pub struct Options {
@@ -34,6 +35,7 @@ pub struct Options {
     pub metrics_file: Option<PathBuf>,
     pub light: bool,
     pub reduced_motion: bool,
+    pub explicit_notes_dir: bool,
 }
 
 struct Fonts {
@@ -55,7 +57,7 @@ impl Fonts {
                 },
                 None,
                 if font.bold {
-                    DWRITE_FONT_WEIGHT_SEMI_BOLD
+                    DWRITE_FONT_WEIGHT_BOLD
                 } else {
                     DWRITE_FONT_WEIGHT_NORMAL
                 },
@@ -165,9 +167,12 @@ struct App {
     paints: u64,
     error: Option<String>,
     editor: Option<crate::editor::Editor>,
+    images: crate::images::Images,
+    library_scroll: usize,
+    tray_available: bool,
 }
 impl App {
-    unsafe fn new(options: Options) -> Result<Self> {
+    unsafe fn new(mut options: Options) -> Result<Self> {
         unsafe {
             let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
             let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
@@ -182,6 +187,12 @@ impl App {
             }
             state.width = state.width.clamp(340, 1600);
             state.height = state.height.clamp(420, 1600);
+            if !options.explicit_notes_dir
+                && let Some(directory) = &state.notes_dir
+            {
+                options.notes_dir = directory.clone();
+            }
+            let _ = fs::create_dir_all(&options.notes_dir);
             let (notes, error) = match store::list_notes(&options.notes_dir) {
                 Ok(notes) => (notes, None),
                 Err(error) => (Vec::new(), Some(error.to_string())),
@@ -191,7 +202,7 @@ impl App {
                 .as_ref()
                 .and_then(|path| notes.iter().position(|n| &n.path == path))
                 .unwrap_or(0);
-            let source = notes.get(selected).and_then(|note| fs::read_to_string(&note.path).ok())
+            let source = notes.get(selected).and_then(|note| crate::edit::read_note(&note.path).ok())
             .unwrap_or_else(|| "# Your quiet corner\n\nPut Markdown files in the notes folder to begin.\n\n## Event-driven by design\n\nThe canvas sleeps when nothing changes.".into());
             let mut scene = Scene::new(&Document::parse(&source), &fonts);
             scene.reflow(state.width as f32 - 72.0);
@@ -217,6 +228,9 @@ impl App {
                 scroll: 0.0,
                 paints: 0,
                 editor: None,
+                images: crate::images::Images::new()?,
+                library_scroll: 0,
+                tray_available: false,
                 error,
             })
         }
@@ -306,6 +320,7 @@ impl App {
                 self.state.height = ((bounds.bottom - bounds.top) as f32 / self.scale) as i32;
             }
             self.state.selected = self.notes.get(self.selected).map(|n| n.path.clone());
+            self.state.notes_dir = Some(self.options.notes_dir.clone());
             if let Err(error) = self.state.save(&self.options.state_file) {
                 eprintln!("state save: {error}");
             }
@@ -316,7 +331,7 @@ impl App {
             if index >= self.notes.len() || !self.finish_edit() {
                 return;
             }
-            match fs::read_to_string(&self.notes[index].path) {
+            match crate::edit::read_note(&self.notes[index].path) {
                 Ok(source) => {
                     self.scene = Scene::new(&Document::parse(&source), &self.fonts);
                     self.selected = index;
@@ -348,6 +363,67 @@ impl App {
                 },
                 brush,
             );
+        }
+    }
+    unsafe fn line_layout(
+        &self,
+        line: &crate::layout::Line,
+        width: f32,
+    ) -> Result<IDWriteTextLayout> {
+        unsafe {
+            let wide: Vec<u16> = line.text.encode_utf16().collect();
+            let format = self.fonts.format(line.font)?;
+            let layout = self.fonts.factory.CreateTextLayout(
+                &wide,
+                &format,
+                width.max(16.0),
+                line.height + 4.0,
+            )?;
+            for run in &line.runs {
+                let start = line.text[..run.start].encode_utf16().count() as u32;
+                let range = DWRITE_TEXT_RANGE {
+                    startPosition: start,
+                    length: line.text[run.start..run.end].encode_utf16().count() as u32,
+                };
+                if run.style.bold {
+                    layout.SetFontWeight(DWRITE_FONT_WEIGHT_BOLD, range)?;
+                }
+                if run.style.italic {
+                    layout.SetFontStyle(DWRITE_FONT_STYLE_ITALIC, range)?;
+                }
+                if run.style.code {
+                    layout.SetFontFamilyName(w!("Cascadia Mono"), range)?;
+                }
+                if run.style.strike {
+                    layout.SetStrikethrough(true, range)?;
+                }
+                if run.style.link.is_some() {
+                    layout.SetUnderline(true, range)?;
+                }
+            }
+            Ok(layout)
+        }
+    }
+    unsafe fn rich_text(
+        &self,
+        line: &crate::layout::Line,
+        x: f32,
+        y: f32,
+        width: f32,
+        rgb: u32,
+        alpha: f32,
+    ) -> Result<()> {
+        unsafe {
+            let layout = self.line_layout(line, width)?;
+            let brush = self.brush.as_ref().unwrap();
+            brush.SetColor(&color(rgb, alpha));
+            self.target.as_ref().unwrap().DrawTextLayout(
+                Vector2 { X: x, Y: y },
+                &layout,
+                brush,
+                D2D1_DRAW_TEXT_OPTIONS_CLIP,
+            );
+            Ok(())
         }
     }
     unsafe fn text(
@@ -512,10 +588,11 @@ impl App {
                 for (i, note) in self
                     .notes
                     .iter()
-                    .take(((self.height - 170.0) / 48.0).max(0.0) as usize)
                     .enumerate()
+                    .skip(self.library_scroll)
+                    .take(((self.height - 170.0) / 48.0).max(0.0) as usize)
                 {
-                    let y = 112.0 + i as f32 * 48.0;
+                    let y = 112.0 + (i - self.library_scroll) as f32 * 48.0;
                     let hovered =
                         self.hover.0 < 158.0 && self.hover.1 >= y && self.hover.1 < y + 40.0;
                     if i == self.selected || hovered {
@@ -550,16 +627,102 @@ impl App {
                 ),
                 D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
             );
+            for cell in &self.scene.cells {
+                let y = top + cell.y - self.scroll;
+                self.fill(
+                    rect(content_x + cell.x, y, cell.width, cell.height),
+                    0.0,
+                    if cell.header {
+                        palette.panel
+                    } else {
+                        palette.card
+                    },
+                    progress,
+                );
+                self.fill(
+                    rect(content_x + cell.x, y, cell.width, 1.0),
+                    0.0,
+                    palette.line,
+                    progress,
+                );
+                self.fill(
+                    rect(content_x + cell.x, y, 1.0, cell.height),
+                    0.0,
+                    palette.line,
+                    progress,
+                );
+                self.fill(
+                    rect(content_x + cell.x + cell.width - 1.0, y, 1.0, cell.height),
+                    0.0,
+                    palette.line,
+                    progress,
+                );
+                self.fill(
+                    rect(content_x + cell.x, y + cell.height - 1.0, cell.width, 1.0),
+                    0.0,
+                    palette.line,
+                    progress,
+                );
+            }
+            for y in &self.scene.rules {
+                self.fill(
+                    rect(
+                        content_x,
+                        top + y - self.scroll,
+                        self.width - content_x - 28.0,
+                        1.0,
+                    ),
+                    0.0,
+                    palette.line,
+                    progress,
+                );
+            }
+            for image in &self.scene.images {
+                let y = top + image.y - self.scroll;
+                if y + image.height < 106.0 || y > self.height - 46.0 {
+                    continue;
+                }
+                if let Some(bitmap) =
+                    self.images
+                        .load(target, &self.options.notes_dir, &image.source)
+                {
+                    let size = bitmap.GetSize();
+                    let scale = (image.width / size.width).min(image.height / size.height);
+                    let destination = rect(
+                        content_x + (image.width - size.width * scale) * 0.5,
+                        y,
+                        size.width * scale,
+                        size.height * scale,
+                    );
+                    target.DrawBitmap(
+                        &bitmap,
+                        Some(&destination),
+                        progress,
+                        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                        None,
+                    );
+                    continue;
+                }
+                self.fill(
+                    rect(content_x, y, image.width, image.height),
+                    8.0,
+                    palette.panel,
+                    progress,
+                );
+                self.text(
+                    &format!("Image: {}", image.alt),
+                    small,
+                    rect(content_x + 12.0, y + 12.0, image.width - 24.0, 24.0),
+                    palette.muted,
+                    progress,
+                )?;
+            }
             for line in &self.scene.lines {
                 let y = top + line.y - self.scroll;
                 if y + line.height < 106.0 || y > self.height - 46.0 {
                     continue;
                 }
-                let inset = if matches!(line.kind, Kind::Code | Kind::Quote) {
-                    16.0
-                } else {
-                    0.0
-                };
+                let inset = line.x;
                 if line.kind == Kind::Code {
                     self.fill(
                         rect(
@@ -587,15 +750,11 @@ impl App {
                     Kind::Quote => palette.muted,
                     _ => palette.ink,
                 };
-                self.text(
-                    &line.text,
-                    line.font,
-                    rect(
-                        content_x + inset,
-                        y,
-                        self.width - content_x - 28.0 - inset,
-                        line.height + 4.0,
-                    ),
+                self.rich_text(
+                    line,
+                    content_x + inset,
+                    y,
+                    (line.width + 3.0).min(self.width - content_x - 28.0 - inset),
                     rgb,
                     progress,
                 )?;
@@ -629,6 +788,49 @@ impl App {
                 self.brush = None;
             }
             result
+        }
+    }
+    unsafe fn actions_menu(&self) {
+        unsafe {
+            if let Ok(menu) = CreatePopupMenu() {
+                for (id, label) in [
+                    (202, "New note\tCtrl+N"),
+                    (200, "Edit\tCtrl+E"),
+                    (201, "Save\tCtrl+S"),
+                    (203, "Read\tCtrl+Enter"),
+                    (204, "Open notes folder"),
+                    (205, "Choose folder\tCtrl+O"),
+                    (206, "Hide to tray\tCtrl+H"),
+                    (208, "Rename note\tF2"),
+                    (209, "Move note to trash"),
+                    (210, "Open note trash"),
+                    (207, "Quit"),
+                ] {
+                    let wide: Vec<u16> = label.encode_utf16().chain([0]).collect();
+                    let _ = AppendMenuW(menu, MF_STRING, id, PCWSTR(wide.as_ptr()));
+                }
+                let mut point = POINT::default();
+                let _ = GetCursorPos(&mut point);
+                let _ = SetForegroundWindow(self.hwnd);
+                let command = TrackPopupMenu(
+                    menu,
+                    TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                    point.x,
+                    point.y,
+                    None,
+                    self.hwnd,
+                    None,
+                );
+                let _ = DestroyMenu(menu);
+                if command.0 != 0 {
+                    let _ = PostMessageW(
+                        Some(self.hwnd),
+                        WM_COMMAND,
+                        WPARAM(command.0 as usize),
+                        LPARAM(0),
+                    );
+                }
+            }
         }
     }
     fn start_edit(&mut self) {
@@ -770,8 +972,84 @@ impl App {
                     let _ = InvalidateRect(Some(self.hwnd), None, false);
                 }
             } else if self.library && x < 160.0 && y >= 112.0 {
-                self.select(((y - 112.0) / 48.0) as usize);
+                self.select(self.library_scroll + ((y - 112.0) / 48.0) as usize);
+            } else if self.editor.is_none() {
+                let local_y = y - 116.0 + self.scroll;
+                if let Some(line) = self
+                    .scene
+                    .lines
+                    .iter()
+                    .find(|line| local_y >= line.y && local_y < line.y + line.height)
+                    && let Ok(layout) = self.line_layout(line, (line.width + 3.0).max(16.0))
+                {
+                    let mut trailing = windows::core::BOOL::default();
+                    let mut inside = windows::core::BOOL::default();
+                    let mut metrics = DWRITE_HIT_TEST_METRICS::default();
+                    if layout
+                        .HitTestPoint(
+                            x - self.content_x() - line.x,
+                            local_y - line.y,
+                            &mut trailing,
+                            &mut inside,
+                            &mut metrics,
+                        )
+                        .is_ok()
+                        && inside.as_bool()
+                    {
+                        for run in &line.runs {
+                            let start = line.text[..run.start].encode_utf16().count() as u32;
+                            let end = line.text[..run.end].encode_utf16().count() as u32;
+                            if metrics.textPosition >= start
+                                && metrics.textPosition < end
+                                && let Some(url) = &run.style.link
+                            {
+                                crate::desktop::open_link(self.hwnd, url);
+                            }
+                        }
+                    }
+                }
             }
+        }
+    }
+    fn refresh_notes(&mut self) {
+        let path = self
+            .editor
+            .as_ref()
+            .map(|e| e.buffer.path.clone())
+            .or_else(|| self.notes.get(self.selected).map(|n| n.path.clone()));
+        match store::list_notes(&self.options.notes_dir) {
+            Ok(notes) => {
+                self.notes = notes;
+                self.selected = path
+                    .as_ref()
+                    .and_then(|p| self.notes.iter().position(|n| &n.path == p))
+                    .unwrap_or(0);
+                if self.editor.is_none() {
+                    if self.notes.is_empty() {
+                        self.scene = Scene::new(
+                            &Document::parse(
+                                "# Your quiet corner\n\nUse + to create a note or choose a folder with Ctrl+O.",
+                            ),
+                            &self.fonts,
+                        );
+                        self.images.clear();
+                        self.reflow();
+                    }
+                    if let Some(note) = self.notes.get(self.selected)
+                        && let Ok(buffer) = crate::edit::EditBuffer::open(&note.path)
+                    {
+                        self.scene = Scene::new(&Document::parse(&buffer.text), &self.fonts);
+                        self.images.clear();
+                        self.reflow();
+                    }
+                } else {
+                    self.error = Some("Source changed — Save checks for conflicts".into());
+                }
+                unsafe {
+                    let _ = InvalidateRect(Some(self.hwnd), None, false);
+                }
+            }
+            Err(error) => self.error = Some(error.to_string()),
         }
     }
     fn metrics(&self) -> serde_json::Value {
@@ -779,7 +1057,7 @@ impl App {
             "font_measurements":self.fonts.measurements.get(),"prepare_blocks":self.scene.prepare_passes,
             "layout_passes":self.scene.layout_passes,"paint_count":self.paints,"animation_active":self.motion.active(),
             "lines":self.scene.lines.len(),"width_dip":self.width,"height_dip":self.height,
-            "selected":self.notes.get(self.selected).map(|n| &n.title)})
+            "selected":self.notes.get(self.selected).map(|n| &n.title),"table_cells":self.scene.cells.len(),"images":self.scene.images.len(),"styled_runs":self.scene.lines.iter().map(|l|l.runs.iter().filter(|r|r.style.bold||r.style.italic||r.style.code||r.style.link.is_some()||r.style.strike).count()).sum::<usize>()})
     }
 }
 
@@ -926,6 +1204,15 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
             }
             WM_MOUSEWHEEL => {
                 let delta = ((w.0 >> 16) & 0xffff) as i16 as f32;
+                if app.library && app.hover.0 < 160.0 {
+                    app.library_scroll = if delta < 0.0 {
+                        (app.library_scroll + 1).min(app.notes.len().saturating_sub(1))
+                    } else {
+                        app.library_scroll.saturating_sub(1)
+                    };
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                    return LRESULT(0);
+                }
                 app.scroll = (app.scroll - delta / 120.0 * 72.0)
                     .clamp(0.0, (app.scene.height - (app.height - 160.0)).max(0.0));
                 let _ = InvalidateRect(Some(hwnd), None, false);
@@ -943,6 +1230,9 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                         app.reflow();
                         app.animate();
                     }
+                    0x71 => {
+                        let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(208), LPARAM(0));
+                    }
                     0x74 => {
                         let index = app.selected;
                         app.select(index);
@@ -954,6 +1244,13 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                     0x25 => {
                         let index = app.selected.saturating_sub(1);
                         app.select(index);
+                    }
+                    0x21 | 0x22 => {
+                        let delta =
+                            (app.height - 190.0).max(100.0) * if w.0 == 0x22 { 1.0 } else { -1.0 };
+                        app.scroll = (app.scroll + delta)
+                            .clamp(0.0, (app.scene.height - (app.height - 160.0)).max(0.0));
+                        let _ = InvalidateRect(Some(hwnd), None, false);
                     }
                     0x23 => {
                         app.scroll = (app.scene.height - (app.height - 160.0)).max(0.0);
@@ -1000,8 +1297,87 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                 }
                 LRESULT(0)
             }
+            0x8006 => {
+                app.refresh_notes();
+                LRESULT(0)
+            }
+            crate::desktop::TRAY_MESSAGE => {
+                if l.0 as u32 == WM_LBUTTONDBLCLK {
+                    let _ = ShowWindow(hwnd, SW_RESTORE);
+                    let _ = SetForegroundWindow(hwnd);
+                } else if l.0 as u32 == WM_RBUTTONUP {
+                    app.actions_menu();
+                }
+                LRESULT(0)
+            }
+            WM_RBUTTONUP => {
+                app.actions_menu();
+                LRESULT(0)
+            }
             WM_COMMAND => {
-                if w.0 & 0xffff == 200 {
+                let command = w.0 & 0xffff;
+                if command == 204 {
+                    crate::desktop::open_folder(hwnd, &app.options.notes_dir);
+                } else if command == 205 && app.finish_edit() {
+                    if let Some(path) = crate::desktop::choose_folder(hwnd) {
+                        app.options.notes_dir = path;
+                        app.refresh_notes();
+                        app.persist();
+                    }
+                } else if command == 206 {
+                    if app.tray_available {
+                        app.persist();
+                        let _ = ShowWindow(hwnd, SW_HIDE);
+                    } else {
+                        app.error =
+                            Some("Tray is unavailable; the note window stays visible".into());
+                    }
+                } else if command == 208 && app.finish_edit() {
+                    let path = app.notes.get(app.selected).map(|n| n.path.clone());
+                    if let Some(path) = path
+                        && let Some(name) = crate::prompt::ask(
+                            hwnd,
+                            "Rename note",
+                            path.file_stem()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .as_ref(),
+                        )
+                    {
+                        match crate::notes::rename(&path, &name) {
+                            Ok(destination) => {
+                                app.refresh_notes();
+                                if let Some(i) =
+                                    app.notes.iter().position(|n| n.path == destination)
+                                {
+                                    app.select(i);
+                                }
+                            }
+                            Err(error) => app.error = Some(error.to_string()),
+                        }
+                    }
+                } else if command == 209 && app.finish_edit() {
+                    if MessageBoxW(
+                        Some(hwnd),
+                        w!("Move this note to the local note trash? It can be restored manually."),
+                        w!("Rusty Note"),
+                        MB_YESNO | MB_ICONQUESTION,
+                    ) == IDYES
+                        && let Some(note) = app.notes.get(app.selected)
+                    {
+                        if let Err(error) = crate::notes::trash(&note.path) {
+                            app.error = Some(error.to_string());
+                        } else {
+                            app.refresh_notes();
+                        }
+                    }
+                } else if command == 210 {
+                    let path = app.options.notes_dir.join(".rusty-note-trash");
+                    let _ = fs::create_dir_all(&path);
+                    crate::desktop::open_folder(hwnd, &path);
+                } else if command == 207 {
+                    let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+                } else if w.0 & 0xffff == 200 {
                     app.start_edit();
                 } else if w.0 & 0xffff == 201 {
                     app.save_edit();
@@ -1013,7 +1389,17 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                 let _ = InvalidateRect(Some(hwnd), None, false);
                 LRESULT(0)
             }
+            WM_CTLCOLOREDIT => {
+                let light = app.state.light;
+                if let Some(editor) = app.editor.as_mut() {
+                    let brush = editor.paint_background(HDC(w.0 as *mut _), light);
+                    return LRESULT(brush.0 as isize);
+                }
+                drop(app);
+                DefWindowProcW(hwnd, msg, w, l)
+            }
             WM_EXITSIZEMOVE => {
+                app.state.notes_dir = Some(app.options.notes_dir.clone());
                 app.persist();
                 LRESULT(0)
             }
@@ -1045,6 +1431,7 @@ pub fn run(options: Options) -> Result<()> {
         let instance = GetModuleHandleW(None)?;
         let class = WNDCLASSW {
             lpfnWndProc: Some(window_proc),
+            hIcon: LoadIconW(None, IDI_APPLICATION)?,
             hInstance: HINSTANCE(instance.0),
             hCursor: LoadCursorW(None, IDC_ARROW)?,
             lpszClassName: w!("RustyNote.Native"),
@@ -1123,8 +1510,38 @@ pub fn run(options: Options) -> Result<()> {
                 SetTimer(Some(hwnd), 2, 1400, None);
             }
         }
+        let tray = crate::desktop::Tray::new(hwnd).ok();
+        (*ptr).borrow_mut().tray_available = tray.is_some();
+        let _tray = tray;
+        let mut watched = (*ptr).borrow().options.notes_dir.clone();
+        let mut watch = crate::desktop::Watch::new(&watched).ok();
         let mut message = MSG::default();
         loop {
+            if !IsWindow(Some(hwnd)).as_bool() {
+                let result = GetMessageW(&mut message, None, 0, 0);
+                if result.0 <= 0 {
+                    break;
+                }
+                continue;
+            }
+            let directory = (*ptr).borrow().options.notes_dir.clone();
+            if directory != watched {
+                watched = directory;
+                watch = crate::desktop::Watch::new(&watched).ok();
+            }
+            if let Some(watch) = &watch {
+                let wait = MsgWaitForMultipleObjectsEx(
+                    Some(&[watch.handle()]),
+                    u32::MAX,
+                    QS_ALLINPUT,
+                    MWMO_INPUTAVAILABLE,
+                );
+                if wait.0 == 0 {
+                    watch.rearm();
+                    SendMessageW(hwnd, 0x8006, None, None);
+                    continue;
+                }
+            }
             let result = GetMessageW(&mut message, None, 0, 0);
             if result.0 <= 0 {
                 break;
@@ -1135,6 +1552,8 @@ pub fn run(options: Options) -> Result<()> {
                     0x53 => Some(201),
                     0x4e => Some(202),
                     0x0d => Some(203),
+                    0x4f => Some(205),
+                    0x48 => Some(206),
                     _ => None,
                 };
                 if let Some(command) = command {

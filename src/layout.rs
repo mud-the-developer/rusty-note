@@ -1,7 +1,7 @@
-use crate::document::{Document, Kind};
+use crate::document::{Document, Kind, Run};
 use gpui_pretext::{
-    EngineProfile, PrepareOptions, PreparedTextWithSegments, TextMeasure, layout_with_lines,
-    prepare_with_segments,
+    EngineProfile, PrepareOptions, PreparedTextWithSegments, TextMeasure, WhiteSpaceMode,
+    layout_with_lines, prepare_with_segments,
 };
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -38,19 +38,117 @@ impl Font {
 pub trait FontMeasure {
     fn width(&self, text: &str, font: Font) -> f64;
 }
+// Conservative styled wrapping: each prepared segment reserves the largest real
+// advance among fonts used in this block. Rendering applies exact DirectWrite
+// ranges; resize never measures fonts or guesses from character counts.
 struct Measure<'a> {
     backend: &'a dyn FontMeasure,
-    font: Font,
+    fonts: Vec<Font>,
 }
 impl TextMeasure for Measure<'_> {
     fn measure_width(&self, text: &str) -> f64 {
-        self.backend.width(text, self.font)
+        self.fonts
+            .iter()
+            .map(|f| self.backend.width(text, *f))
+            .fold(0.0, f64::max)
     }
 }
-struct PreparedBlock {
-    kind: Kind,
-    font: Font,
+struct Prepared {
     text: PreparedTextWithSegments,
+    source: String,
+    runs: Vec<Run>,
+    font: Font,
+}
+impl Prepared {
+    fn new(text: &str, runs: &[Run], font: Font, meter: &dyn FontMeasure) -> Self {
+        let mut fonts = vec![font];
+        for run in runs {
+            let mut f = font;
+            f.bold |= run.style.bold;
+            f.mono |= run.style.code;
+            if !fonts.contains(&f) {
+                fonts.push(f);
+            }
+        }
+        Self {
+            text: prepare_with_segments(
+                text,
+                &Measure {
+                    backend: meter,
+                    fonts,
+                },
+                &EngineProfile::default(),
+                &PrepareOptions {
+                    white_space: WhiteSpaceMode::PreWrap,
+                },
+            ),
+            source: text.into(),
+            runs: runs.to_vec(),
+            font,
+        }
+    }
+    fn wrap(&self, width: f32, x: f32, y: &mut f32, kind: Kind, lines: &mut Vec<Line>) {
+        let height = self.font.size as f32 * 1.55;
+        let wrapped = layout_with_lines(
+            &self.text,
+            f64::from(width.max(24.0)),
+            f64::from(height),
+            &EngineProfile::default(),
+        );
+        let mut search = 0usize;
+        for line in wrapped.lines {
+            let start = self
+                .source
+                .get(search..)
+                .and_then(|tail| tail.find(&line.text))
+                .map(|i| search + i);
+            let matched = start.is_some();
+            let start = start.unwrap_or(search);
+            let end = if matched {
+                start + line.text.len()
+            } else {
+                start
+            };
+            let runs = self
+                .runs
+                .iter()
+                .filter_map(|r| {
+                    let a = r.start.max(start);
+                    let b = r.end.min(end);
+                    (matched && a < b).then(|| Run {
+                        start: a - start,
+                        end: b - start,
+                        style: r.style.clone(),
+                    })
+                })
+                .collect();
+            search = end;
+            lines.push(Line {
+                kind,
+                font: self.font,
+                text: line.text,
+                y: *y,
+                x,
+                width: line.width as f32,
+                height,
+                runs,
+            });
+            *y += height;
+        }
+    }
+}
+enum PreparedBlock {
+    Text {
+        kind: Kind,
+        indent: usize,
+        text: Box<Prepared>,
+    },
+    Table(Vec<Vec<Prepared>>),
+    Rule,
+    Image {
+        source: String,
+        alt: String,
+    },
 }
 #[derive(Clone)]
 pub struct Line {
@@ -58,47 +156,99 @@ pub struct Line {
     pub font: Font,
     pub text: String,
     pub y: f32,
+    pub x: f32,
+    pub width: f32,
+    pub height: f32,
+    pub runs: Vec<Run>,
+}
+#[derive(Clone, Debug)]
+pub struct CellBox {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub header: bool,
+}
+#[derive(Clone, Debug)]
+pub struct ImageBox {
+    pub source: String,
+    pub alt: String,
+    pub y: f32,
     pub width: f32,
     pub height: f32,
 }
 pub struct Scene {
     blocks: Vec<PreparedBlock>,
     pub lines: Vec<Line>,
+    pub cells: Vec<CellBox>,
+    pub rules: Vec<f32>,
+    pub images: Vec<ImageBox>,
     pub height: f32,
     width: f32,
     pub prepare_passes: usize,
     pub layout_passes: usize,
 }
 impl Scene {
-    pub fn new(document: &Document, measure: &dyn FontMeasure) -> Self {
-        let profile = EngineProfile::default();
-        let blocks = document
+    pub fn new(doc: &Document, meter: &dyn FontMeasure) -> Self {
+        let blocks = doc
             .blocks
             .iter()
-            .map(|block| {
-                let font = Font::for_kind(block.kind);
-                let text = prepare_with_segments(
-                    &block.text,
-                    &Measure {
-                        backend: measure,
-                        font,
-                    },
-                    &profile,
-                    &PrepareOptions::default(),
-                );
-                PreparedBlock {
-                    kind: block.kind,
-                    font,
-                    text,
+            .map(|b| match b.kind {
+                Kind::Rule => PreparedBlock::Rule,
+                Kind::Image => {
+                    let img = b.image.as_ref().unwrap();
+                    PreparedBlock::Image {
+                        source: img.source.clone(),
+                        alt: img.alt.clone(),
+                    }
                 }
+                Kind::Table => {
+                    let rows = b
+                        .table
+                        .as_ref()
+                        .unwrap()
+                        .rows
+                        .iter()
+                        .enumerate()
+                        .map(|(index, row)| {
+                            row.iter()
+                                .map(|cell| {
+                                    Prepared::new(
+                                        &cell.text,
+                                        &cell.runs,
+                                        Font {
+                                            bold: index == 0,
+                                            ..Font::for_kind(Kind::Table)
+                                        },
+                                        meter,
+                                    )
+                                })
+                                .collect()
+                        })
+                        .collect();
+                    PreparedBlock::Table(rows)
+                }
+                _ => PreparedBlock::Text {
+                    kind: b.kind,
+                    indent: b.indent,
+                    text: Box::new(Prepared::new(
+                        &b.text,
+                        &b.runs,
+                        Font::for_kind(b.kind),
+                        meter,
+                    )),
+                },
             })
             .collect();
         Self {
             blocks,
             lines: Vec::new(),
+            cells: Vec::new(),
+            rules: Vec::new(),
+            images: Vec::new(),
             height: 0.0,
             width: -1.0,
-            prepare_passes: document.blocks.len(),
+            prepare_passes: doc.blocks.len(),
             layout_passes: 0,
         }
     }
@@ -110,41 +260,87 @@ impl Scene {
         self.width = width;
         self.layout_passes += 1;
         self.lines.clear();
+        self.cells.clear();
+        self.rules.clear();
+        self.images.clear();
         let mut y = 0.0;
         for block in &self.blocks {
-            let inset = if matches!(block.kind, Kind::Quote | Kind::Code) {
-                20.0
-            } else {
-                0.0
-            };
-            let line_height = block.font.size as f32 * 1.55;
-            let wrapped = layout_with_lines(
-                &block.text,
-                f64::from((width - inset).max(32.0)),
-                f64::from(line_height),
-                &EngineProfile::default(),
-            );
-            for line in wrapped.lines {
-                self.lines.push(Line {
-                    kind: block.kind,
-                    font: block.font,
-                    text: line.text,
-                    y,
-                    width: line.width as f32,
-                    height: line_height,
-                });
-                y += line_height;
+            match block {
+                PreparedBlock::Text { kind, indent, text } => {
+                    let inset = if matches!(kind, Kind::Quote | Kind::Code) {
+                        16.0
+                    } else {
+                        0.0
+                    } + (*indent as f32 * 14.0).min(width * 0.25);
+                    text.wrap(
+                        (width - inset).max(24.0),
+                        inset,
+                        &mut y,
+                        *kind,
+                        &mut self.lines,
+                    );
+                    y += if matches!(kind, Kind::Heading(_)) {
+                        13.0
+                    } else {
+                        18.0
+                    };
+                }
+                PreparedBlock::Rule => {
+                    self.rules.push(y + 8.0);
+                    y += 28.0;
+                }
+                PreparedBlock::Image { source, alt } => {
+                    let height = (width * 0.6).clamp(90.0, 240.0);
+                    self.images.push(ImageBox {
+                        source: source.clone(),
+                        alt: alt.clone(),
+                        y,
+                        width,
+                        height,
+                    });
+                    y += height + 18.0;
+                }
+                PreparedBlock::Table(rows) => {
+                    let columns = rows.iter().map(Vec::len).max().unwrap_or(1).max(1);
+                    let cell_width = width / columns as f32;
+                    for (index, row) in rows.iter().enumerate() {
+                        let top = y;
+                        let mut bottom = top + 32.0;
+                        for (col, cell) in row.iter().enumerate() {
+                            let mut cell_y = top + 8.0;
+                            cell.wrap(
+                                (cell_width - 16.0).max(8.0),
+                                col as f32 * cell_width + 8.0,
+                                &mut cell_y,
+                                Kind::Table,
+                                &mut self.lines,
+                            );
+                            bottom = bottom.max(cell_y + 8.0);
+                        }
+                        for col in 0..columns {
+                            self.cells.push(CellBox {
+                                x: col as f32 * cell_width,
+                                y: top,
+                                width: cell_width,
+                                height: bottom - top,
+                                header: index == 0,
+                            });
+                        }
+                        y = bottom;
+                    }
+                    y += 18.0;
+                }
             }
-            y += if matches!(block.kind, Kind::Heading(_)) {
-                13.0
-            } else {
-                18.0
-            };
         }
         self.height = y;
     }
+    pub fn link_at(&self, x: f32, y: f32) -> Option<&str> {
+        self.lines
+            .iter()
+            .find(|l| y >= l.y && y < l.y + l.height && x >= l.x && x <= l.x + l.width)
+            .and_then(|l| l.runs.iter().find_map(|r| r.style.link.as_deref()))
+    }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,7 +349,7 @@ mod tests {
     impl FontMeasure for Meter {
         fn width(&self, text: &str, font: Font) -> f64 {
             self.0.set(self.0.get() + 1);
-            text.chars().count() as f64 * f64::from(font.size) * 0.55
+            text.chars().count() as f64 * f64::from(font.size) * if font.bold { 0.61 } else { 0.55 }
         }
     }
     #[test]
@@ -177,5 +373,29 @@ mod tests {
         let passes = scene.layout_passes;
         scene.reflow(360.0);
         assert_eq!(passes, scene.layout_passes);
+    }
+    #[test]
+    fn tables_are_real_cells_and_surrounding_content_survives() {
+        let meter = Meter(Cell::new(0));
+        let doc = Document::parse(
+            "Before **bold**\n\n| A | B |\n|---|---|\n| multiple long words wrapped | other |\n\nAfter\n\n```\n  indent\n\n  last\n```",
+        );
+        let mut scene = Scene::new(&doc, &meter);
+        scene.reflow(180.0);
+        assert_eq!(scene.cells.len(), 4);
+        assert!(scene.cells.iter().all(|c| c.x + c.width <= 180.1));
+        assert!(
+            scene
+                .lines
+                .iter()
+                .any(|l| l.runs.iter().any(|r| r.style.bold))
+        );
+        assert!(scene.lines.iter().any(|l| l.text == "After"));
+        assert!(
+            scene
+                .lines
+                .iter()
+                .any(|l| l.kind == Kind::Code && l.text.starts_with("  "))
+        );
     }
 }

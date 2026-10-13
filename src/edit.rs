@@ -6,6 +6,39 @@ use std::{
 };
 
 pub const MAX_NOTE_BYTES: u64 = 2 * 1024 * 1024;
+pub fn read_note(path: &Path) -> io::Result<String> {
+    let mut text = String::new();
+    fs::File::open(path)?
+        .take(MAX_NOTE_BYTES + 1)
+        .read_to_string(&mut text)?;
+    if text.len() as u64 > MAX_NOTE_BYTES || text.contains('\0') {
+        return Err(io::Error::other(
+            "Unsupported note: exceeds 2 MiB or contains NUL bytes",
+        ));
+    }
+    Ok(text)
+}
+struct SaveLock(PathBuf);
+impl SaveLock {
+    fn acquire(path: &Path) -> io::Result<Self> {
+        let lock = path.with_extension("md.rusty-lock");
+        OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&lock)
+            .map_err(|_| {
+                io::Error::other(
+                    "Another save is in progress or a stale .rusty-lock needs manual review",
+                )
+            })?;
+        Ok(Self(lock))
+    }
+}
+impl Drop for SaveLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
 #[derive(Debug)]
 pub struct EditBuffer {
     pub path: PathBuf,
@@ -14,13 +47,7 @@ pub struct EditBuffer {
 }
 impl EditBuffer {
     pub fn open(path: &Path) -> io::Result<Self> {
-        let mut source = String::new();
-        fs::File::open(path)?
-            .take(MAX_NOTE_BYTES + 1)
-            .read_to_string(&mut source)?;
-        if source.len() as u64 > MAX_NOTE_BYTES {
-            return Err(io::Error::other("Note exceeds 2 MiB"));
-        }
+        let source = read_note(path)?;
         Ok(Self {
             path: path.to_owned(),
             original: source.clone(),
@@ -34,7 +61,8 @@ impl EditBuffer {
         if self.text.len() as u64 > MAX_NOTE_BYTES {
             return Err(io::Error::other("Note exceeds 2 MiB"));
         }
-        let current = fs::read_to_string(&self.path)?;
+        let _lock = SaveLock::acquire(&self.path)?;
+        let current = read_note(&self.path)?;
         if current != self.original {
             return Err(io::Error::other(
                 "File changed outside Rusty Note. Save was blocked; copy your edits before reloading.",
@@ -61,6 +89,11 @@ impl EditBuffer {
             output.write_all(saved.as_bytes())?;
             output.sync_all()?;
             drop(output);
+            if read_note(&self.path)? != self.original {
+                return Err(io::Error::other(
+                    "File changed during Save; replacement blocked",
+                ));
+            }
             fs::rename(&temporary, &self.path)
         })() {
             let _ = fs::remove_file(&temporary);
@@ -123,6 +156,31 @@ mod tests {
             "# Old\r\n\r\nText\r\nMore\r\n"
         );
         assert!(!buffer.dirty());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn bounded_reads_reject_binary_and_oversize_notes() {
+        let root = std::env::temp_dir().join(format!("rusty-bounded-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("bounded.md");
+        fs::write(&path, b"bad\0note").unwrap();
+        assert!(read_note(&path).is_err());
+        fs::write(&path, vec![b'x'; MAX_NOTE_BYTES as usize + 1]).unwrap();
+        assert!(read_note(&path).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn existing_save_lock_does_not_change_note_or_backup() {
+        let root = std::env::temp_dir().join(format!("rusty-lock-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("locked.md");
+        fs::write(&path, "original").unwrap();
+        fs::write(path.with_extension("md.rusty-lock"), "").unwrap();
+        let mut buffer = EditBuffer::open(&path).unwrap();
+        buffer.text = "new".into();
+        assert!(buffer.save().is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "original");
+        assert!(!path.with_extension("md.bak").exists());
         fs::remove_dir_all(root).unwrap();
     }
     #[test]

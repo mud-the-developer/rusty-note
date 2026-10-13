@@ -13,6 +13,8 @@ use windows::{
 pub struct Editor {
     pub hwnd: HWND,
     font: HFONT,
+    background: HBRUSH,
+    background_light: bool,
     pub buffer: EditBuffer,
 }
 impl Editor {
@@ -76,7 +78,13 @@ impl Editor {
                 None,
             ); // EM_SETLIMITTEXT
             let _ = SetFocus(Some(hwnd));
-            Ok(Self { hwnd, font, buffer })
+            Ok(Self {
+                hwnd,
+                font,
+                buffer,
+                background: HBRUSH::default(),
+                background_light: false,
+            })
         }
     }
     pub fn resize(&self, width: f32, height: f32, scale: f32) {
@@ -90,6 +98,21 @@ impl Editor {
                 ((height - 160.0).max(100.0) * scale) as i32,
                 SWP_NOZORDER | SWP_NOACTIVATE,
             );
+        }
+    }
+    pub fn paint_background(&mut self, dc: HDC, light: bool) -> HBRUSH {
+        unsafe {
+            if self.background.0.is_null() || self.background_light != light {
+                if !self.background.0.is_null() {
+                    let _ = DeleteObject(HGDIOBJ(self.background.0));
+                }
+                self.background =
+                    CreateSolidBrush(COLORREF(if light { 0x00f7fcff } else { 0x002d1c11 }));
+                self.background_light = light;
+            }
+            let _ = SetBkColor(dc, COLORREF(if light { 0x00f7fcff } else { 0x002d1c11 }));
+            let _ = SetTextColor(dc, COLORREF(if light { 0x00292520 } else { 0x00fbf0e7 }));
+            self.background
         }
     }
     pub fn sync(&mut self) {
@@ -109,6 +132,9 @@ impl Drop for Editor {
     fn drop(&mut self) {
         unsafe {
             let _ = DestroyWindow(self.hwnd);
+            if !self.background.0.is_null() {
+                let _ = DeleteObject(HGDIOBJ(self.background.0));
+            }
             if !self.font.0.is_null() {
                 let _ = DeleteObject(HGDIOBJ(self.font.0));
             }

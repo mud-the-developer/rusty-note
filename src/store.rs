@@ -16,7 +16,7 @@ pub fn default_notes_dir() -> PathBuf {
             .or_else(|| std::env::var_os("HOME"))
             .unwrap_or_default(),
     )
-    .join("Desktop/repo/notes")
+    .join("Documents/Rusty Note")
 }
 pub fn list_notes(dir: &Path) -> io::Result<Vec<Note>> {
     let mut notes = Vec::new();
@@ -57,6 +57,7 @@ pub struct State {
     pub pinned: bool,
     pub light: bool,
     pub selected: Option<PathBuf>,
+    pub notes_dir: Option<PathBuf>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -68,14 +69,25 @@ impl Default for State {
             pinned: true,
             light: false,
             selected: None,
+            notes_dir: None,
         }
     }
 }
 impl State {
     pub fn load(path: &Path) -> Self {
-        fs::read(path)
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        fs::File::open(path)
+            .and_then(|f| f.take(64 * 1024).read_to_end(&mut bytes))
             .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .and_then(|_| serde_json::from_slice(&bytes).ok())
+            .map(|mut state: Self| {
+                state.width = state.width.clamp(340, 1600);
+                state.height = state.height.clamp(420, 1600);
+                state.x = state.x.clamp(-32000, 32000);
+                state.y = state.y.clamp(-32000, 32000);
+                state
+            })
             .unwrap_or_default()
     }
     pub fn save(&self, path: &Path) -> io::Result<()> {

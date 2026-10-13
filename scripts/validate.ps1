@@ -3,11 +3,7 @@ $ErrorActionPreference='Stop'
 $root=(Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $exe=if([IO.Path]::IsPathRooted($Binary)){$Binary}else{Join-Path $root $Binary}
 $out=Join-Path $root 'target/validation'
-$notes=Join-Path $out 'notes'
-New-Item -ItemType Directory -Force $notes | Out-Null
-$fixture=Join-Path $root 'tests/fixtures/studio.md'
-Copy-Item $fixture (Join-Path $notes 'Studio.md') -Force
-Copy-Item (Join-Path $root 'tests/fixtures/moments.md') (Join-Path $notes 'Moments.md') -Force
+$run=[Guid]::NewGuid().ToString('N')
 Add-Type -AssemblyName System.Drawing
 Add-Type @'
 using System;
@@ -28,6 +24,7 @@ public static class NoteProbe {
     [DllImport("user32.dll",CharSet=CharSet.Unicode,EntryPoint="SendMessageW")] public static extern IntPtr SetText(IntPtr h,uint m,IntPtr w,string text);
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h,IntPtr dc,uint f);
     [DllImport("user32.dll")] public static extern bool RedrawWindow(IntPtr h,IntPtr r,IntPtr g,uint f);
+    public static IntPtr Prompt(int pid) {IntPtr found=IntPtr.Zero; EnumWindows((h,p)=>{uint owner;GetWindowThreadProcessId(h,out owner);if(owner!=(uint)pid)return true;var s=new StringBuilder(128);GetClassNameW(h,s,128);if(s.ToString()!="RustyNote.Prompt")return true;found=h;return false;},IntPtr.Zero);return found;}
     public static IntPtr Find(int pid) {IntPtr found=IntPtr.Zero; EnumWindows((h,p)=>{uint owner;GetWindowThreadProcessId(h,out owner);if(owner!=(uint)pid)return true;var s=new StringBuilder(128);GetClassNameW(h,s,128);if(s.ToString()!="RustyNote.Native")return true;found=h;return false;},IntPtr.Zero);return found;}
 }
 '@
@@ -51,6 +48,12 @@ function Capture([IntPtr]$hwnd,[string]$path) {
     }finally{$bitmap.Dispose()}
 }
 foreach($theme in @('dark','light')) {
+    $notes=Join-Path $out "$theme-notes-$run"
+    New-Item -ItemType Directory -Force $notes | Out-Null
+    Copy-Item (Join-Path $root 'tests/fixtures/studio.md') (Join-Path $notes 'Studio.md')
+    Copy-Item (Join-Path $root 'tests/fixtures/complete.md') (Join-Path $notes 'Complete.md')
+    Copy-Item (Join-Path $root 'tests/fixtures/fixture.png') (Join-Path $notes 'fixture.png')
+    [IO.File]::SetLastWriteTimeUtc((Join-Path $notes 'Complete.md'),[DateTime]::UtcNow.AddSeconds(5))
     $state=Join-Path $out "$theme-state.json";$metrics=Join-Path $out "$theme-metrics.json"
     [IO.File]::WriteAllText($state,'{"x":120,"y":100,"width":600,"height":760,"pinned":false,"selected":null,"light":'+($theme -eq 'light').ToString().ToLower()+'}')
     $argv=@('--notes-dir',('"'+$notes+'"'),'--state-file',('"'+$state+'"'),'--metrics-file',('"'+$metrics+'"'))
@@ -71,6 +74,8 @@ foreach($theme in @('dark','light')) {
         $narrow=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
         if($narrow.font_measurements -ne $first.font_measurements){throw 'Resize remeasured fonts'}
         Capture $hwnd (Join-Path $out "$theme-narrow.png")
+        if($narrow.table_cells -lt 6 -or $narrow.images -ne 2 -or $narrow.styled_runs -lt 5){throw 'Rich mixed document structure missing'}
+        foreach($page in 1..4){$null=[NoteProbe]::SendMessageW($hwnd,0x100,[IntPtr]0x22,[IntPtr]::Zero);Capture $hwnd (Join-Path $out "$theme-page-$page.png")}
         $null=[NoteProbe]::SendMessageW($hwnd,0x100,[IntPtr]0x23,[IntPtr]::Zero)
         Capture $hwnd (Join-Path $out "$theme-bottom.png")
         $null=[NoteProbe]::SendMessageW($hwnd,0x100,[IntPtr]0x24,[IntPtr]::Zero)
@@ -110,6 +115,25 @@ foreach($theme in @('dark','light')) {
         $created=[NoteProbe]::GetDlgItem($hwnd,100)
         if($created -eq [IntPtr]::Zero){throw 'New note did not start editing'}
         $null=[NoteProbe]::SendMessageW($hwnd,0x111,[IntPtr]203,[IntPtr]::Zero)
+        # Native folder notifications update the library without a poll timer.
+        [IO.File]::WriteAllText((Join-Path $notes 'Watched.md'),'# Watched note')
+        Start-Sleep -Milliseconds 450
+        $null=[NoteProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero)
+        $watched=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+        if($watched.notes -lt 4){throw 'Native folder watcher did not refresh notes'}
+        # Hide/restore only the owned process through the tray callback.
+        $null=[NoteProbe]::SendMessageW($hwnd,0x111,[IntPtr]206,[IntPtr]::Zero)
+        $null=[NoteProbe]::SendMessageW($hwnd,0x8005,[IntPtr]::Zero,[IntPtr]0x203)
+        # Rename uses a native prompt; use PostMessage to avoid blocking this driver.
+        $null=[NoteProbe]::PostMessageW($hwnd,0x111,[IntPtr]208,[IntPtr]::Zero)
+        Start-Sleep -Milliseconds 300
+        $prompt=[NoteProbe]::Prompt($p.Id)
+        if($prompt -eq [IntPtr]::Zero){throw 'Rename prompt missing'}
+        $name=[NoteProbe]::GetDlgItem($prompt,10)
+        $null=[NoteProbe]::SetText($name,0x0c,[IntPtr]::Zero,'Renamed test')
+        $null=[NoteProbe]::PostMessageW($prompt,0x111,[IntPtr]1,[IntPtr]::Zero)
+        Start-Sleep -Milliseconds 300
+        if(!(Test-Path -LiteralPath (Join-Path $notes 'Renamed test.md'))){throw 'Native rename did not preserve the note'}
     }finally{
         if(!$p.HasExited){$null=[NoteProbe]::PostMessageW([NoteProbe]::Find($p.Id),0x10,[IntPtr]::Zero,[IntPtr]::Zero);if(!$p.WaitForExit(10000)){Stop-Process -Id $p.Id -Force;throw 'Owned app did not close'}}
     }
