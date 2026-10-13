@@ -129,6 +129,28 @@ pub fn safe_link(url: &str) -> bool {
             || value.starts_with("http://")
             || value.starts_with("mailto:"))
 }
+pub fn choose_markdown(hwnd: HWND) -> Option<PathBuf> {
+    use windows::Win32::UI::Controls::Dialogs::*;
+    unsafe {
+        let mut buffer = vec![0u16; 32768];
+        let filter: Vec<u16> = "Markdown (*.md)\0*.md\0\0".encode_utf16().collect();
+        let mut dialog = OPENFILENAMEW {
+            lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+            hwndOwner: hwnd,
+            lpstrFilter: PCWSTR(filter.as_ptr()),
+            lpstrFile: windows::core::PWSTR(buffer.as_mut_ptr()),
+            nMaxFile: buffer.len() as u32,
+            lpstrTitle: w!("Open Markdown sticker"),
+            Flags: OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
+            ..Default::default()
+        };
+        if !GetOpenFileNameW(&mut dialog).as_bool() {
+            return None;
+        }
+        let len = buffer.iter().position(|c| *c == 0).unwrap_or(buffer.len());
+        Some(PathBuf::from(String::from_utf16_lossy(&buffer[..len])))
+    }
+}
 pub fn choose_folder(hwnd: HWND) -> Option<PathBuf> {
     unsafe {
         let browse = BROWSEINFOW {

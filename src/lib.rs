@@ -8,6 +8,7 @@ pub mod notes;
 #[cfg(windows)]
 pub mod prompt;
 pub mod store;
+pub mod viewer;
 
 #[cfg(windows)]
 pub mod desktop;

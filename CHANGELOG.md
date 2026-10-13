@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.1 — simple Markdown sticker
+
+- Default to a small read-only MD viewer, not a note-management/editor UI.
+- Open an existing `.md` via positional path or ↑/Ctrl+O native file dialog.
+- Keep only open/pin/theme/close toolbar controls; header drag and F5 reload.
+- Separate remembered sticker file/placement state; initial size 360x500.
+- Block edit/New/rename/trash/Save commands in viewer mode; source bytes stay untouched.
+- Preserve prior editor only behind explicit `--editor`.
+- Mixed viewer fixture, read-only core tests and native dark/light read-only/idle checks.
+
 ## 0.3.0 — usable native desktop notes
 
 - Rich inline bold/italic/strike/code and safe DirectWrite-hit-tested web/mail links.

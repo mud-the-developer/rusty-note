@@ -12,7 +12,7 @@ fn main() {
         .unwrap_or_else(|| PathBuf::from("."));
     let mut options = Options {
         notes_dir: store::default_notes_dir(),
-        state_file: base.join("RustyNote/state.json"),
+        state_file: base.join("RustyNote/sticker-state.json"),
         ..Default::default()
     };
     let mut args = std::env::args().skip(1);
@@ -35,13 +35,20 @@ fn main() {
                     args.next().expect("--metrics-file needs a path"),
                 ))
             }
+            "--editor" => options.editor_mode = true,
             "--light" => options.light = true,
             "--reduced-motion" => options.reduced_motion = true,
+            _ if !arg.starts_with('-') && options.file.is_none() => {
+                options.file = Some(PathBuf::from(arg))
+            }
             _ => {
                 eprintln!("Unknown argument: {arg}");
                 std::process::exit(2);
             }
         }
+    }
+    if options.editor_mode && options.state_file == base.join("RustyNote/sticker-state.json") {
+        options.state_file = base.join("RustyNote/state.json");
     }
     if let Err(error) = native::run(options) {
         eprintln!("Rusty Note: {error}");

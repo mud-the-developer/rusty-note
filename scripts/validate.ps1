@@ -56,7 +56,7 @@ foreach($theme in @('dark','light')) {
     [IO.File]::SetLastWriteTimeUtc((Join-Path $notes 'Complete.md'),[DateTime]::UtcNow.AddSeconds(5))
     $state=Join-Path $out "$theme-state.json";$metrics=Join-Path $out "$theme-metrics.json"
     [IO.File]::WriteAllText($state,'{"x":120,"y":100,"width":600,"height":760,"pinned":false,"selected":null,"light":'+($theme -eq 'light').ToString().ToLower()+'}')
-    $argv=@('--notes-dir',('"'+$notes+'"'),'--state-file',('"'+$state+'"'),'--metrics-file',('"'+$metrics+'"'))
+    $argv=@('--editor','--notes-dir',('"'+$notes+'"'),'--state-file',('"'+$state+'"'),'--metrics-file',('"'+$metrics+'"'))
     $p=Start-Process -FilePath $exe -ArgumentList $argv -PassThru
     try {
         if(!$p.WaitForInputIdle(15000)){throw 'Native app was not ready'}

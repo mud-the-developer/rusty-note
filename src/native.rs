@@ -36,6 +36,8 @@ pub struct Options {
     pub light: bool,
     pub reduced_motion: bool,
     pub explicit_notes_dir: bool,
+    pub editor_mode: bool,
+    pub file: Option<PathBuf>,
 }
 
 struct Fonts {
@@ -182,6 +184,10 @@ impl App {
                 measurements: Cell::new(0),
             };
             let mut state = State::load(&options.state_file);
+            if !options.editor_mode && !options.state_file.exists() {
+                state.width = 360;
+                state.height = 500;
+            }
             if options.light {
                 state.light = true;
             }
@@ -192,18 +198,35 @@ impl App {
             {
                 options.notes_dir = directory.clone();
             }
-            let _ = fs::create_dir_all(&options.notes_dir);
-            let (notes, error) = match store::list_notes(&options.notes_dir) {
-                Ok(notes) => (notes, None),
-                Err(error) => (Vec::new(), Some(error.to_string())),
+            let (mut notes, mut error) = if options.editor_mode {
+                let _ = fs::create_dir_all(&options.notes_dir);
+                match store::list_notes(&options.notes_dir) {
+                    Ok(notes) => (notes, None),
+                    Err(error) => (Vec::new(), Some(error.to_string())),
+                }
+            } else {
+                (Vec::new(), None)
             };
+            if !options.editor_mode {
+                let initial = options.file.clone().or_else(|| state.selected.clone());
+                if let Some(path) = initial {
+                    match crate::viewer::open(&path) {
+                        Ok((note, _)) => {
+                            options.notes_dir = note.path.parent().unwrap().to_owned();
+                            options.file = Some(note.path.clone());
+                            notes = vec![note];
+                        }
+                        Err(e) => error = Some(e.to_string()),
+                    }
+                }
+            }
             let selected = state
                 .selected
                 .as_ref()
                 .and_then(|path| notes.iter().position(|n| &n.path == path))
                 .unwrap_or(0);
             let source = notes.get(selected).and_then(|note| crate::edit::read_note(&note.path).ok())
-            .unwrap_or_else(|| "# Your quiet corner\n\nPut Markdown files in the notes folder to begin.\n\n## Event-driven by design\n\nThe canvas sleeps when nothing changes.".into());
+            .unwrap_or_else(|| "# Markdown sticker\n\nClick Open or press Ctrl+O to choose a .md file.\n\nDrag the header to place this small window. P keeps it above other windows.\n\nThe original Markdown is read-only.".into());
             let mut scene = Scene::new(&Document::parse(&source), &fonts);
             scene.reflow(state.width as f32 - 72.0);
             let mut motion = Motion::default();
@@ -338,7 +361,15 @@ impl App {
                     self.scroll = 0.0;
                     self.reflow();
                     self.error = None;
-                    let title = format!("Rusty Note — {}", self.notes[index].title);
+                    let title = format!(
+                        "{} — {}",
+                        if self.options.editor_mode {
+                            "Rusty Note"
+                        } else {
+                            "MD Sticker"
+                        },
+                        self.notes[index].title
+                    );
                     let wide: Vec<u16> = title.encode_utf16().chain([0]).collect();
                     let _ = SetWindowTextW(self.hwnd, PCWSTR(wide.as_ptr()));
                     self.animate();
@@ -500,9 +531,28 @@ impl App {
             );
             self.fill(rect(30.0, 48.0, 38.0, 3.0), 1.5, palette.accent, 0.85);
             self.text(
-                "RUSTY NOTE",
+                if self.options.editor_mode {
+                    "RUSTY NOTE"
+                } else {
+                    "MD STICKER"
+                },
                 tiny,
-                rect(126.0, 17.0, (self.width - 246.0).max(0.0), 20.0),
+                rect(
+                    if self.options.editor_mode {
+                        126.0
+                    } else {
+                        64.0
+                    },
+                    17.0,
+                    (self.width
+                        - if self.options.editor_mode {
+                            246.0
+                        } else {
+                            188.0
+                        })
+                    .max(0.0),
+                    20.0,
+                ),
                 palette.muted,
                 1.0,
             )?;
@@ -511,7 +561,7 @@ impl App {
                 .get(self.selected)
                 .map(|n| n.title.as_str())
                 .unwrap_or("Quiet corner");
-            let show_badge = self.width - self.content_x() >= 330.0;
+            let show_badge = self.options.editor_mode && self.width - self.content_x() >= 330.0;
             self.text(
                 title,
                 label,
@@ -535,7 +585,15 @@ impl App {
                 )?;
             }
             for (x, text, on) in [
-                (12.0, "≡", self.library),
+                (
+                    12.0,
+                    if self.options.editor_mode {
+                        "≡"
+                    } else {
+                        "↑"
+                    },
+                    self.library,
+                ),
                 (
                     48.0,
                     if self.editor.is_some() { "✓" } else { "✎" },
@@ -546,6 +604,9 @@ impl App {
                 (self.width - 78.0, "◐", self.state.light),
                 (self.width - 42.0, "×", false),
             ] {
+                if !self.options.editor_mode && (48.0..116.0).contains(&x) {
+                    continue;
+                }
                 let hovered = self.hover.0 >= x && self.hover.0 < x + 30.0 && self.hover.1 < 43.0;
                 self.fill(
                     rect(x, 9.0, 30.0, 30.0),
@@ -763,7 +824,11 @@ impl App {
             self.text(
                 self.error
                     .as_deref()
-                    .unwrap_or("CACHED LAYOUT  ·  EVENT-DRIVEN  ·  RUST"),
+                    .unwrap_or(if self.options.editor_mode {
+                        "CACHED LAYOUT  ·  EVENT-DRIVEN  ·  RUST"
+                    } else {
+                        "READ ONLY  ·  Ctrl+O OPEN  ·  F5 RELOAD"
+                    }),
                 tiny,
                 rect(27.0, self.height - 34.0, self.width - 60.0, 20.0),
                 palette.muted,
@@ -790,6 +855,40 @@ impl App {
             result
         }
     }
+    fn open_markdown(&mut self, path: PathBuf) {
+        match crate::viewer::open(&path) {
+            Ok((note, text)) => {
+                self.options.notes_dir = note.path.parent().unwrap().to_owned();
+                self.options.file = Some(note.path.clone());
+                self.notes = vec![note];
+                self.selected = 0;
+                self.scroll = 0.0;
+                self.images.clear();
+                self.scene = Scene::new(&Document::parse(&text), &self.fonts);
+                self.reflow();
+                self.error = None;
+                unsafe {
+                    let title: Vec<u16> = format!("MD Sticker — {}", self.notes[0].title)
+                        .encode_utf16()
+                        .chain([0])
+                        .collect();
+                    let _ = SetWindowTextW(self.hwnd, PCWSTR(title.as_ptr()));
+                    self.animate();
+                }
+            }
+            Err(error) => {
+                self.error = Some(error.to_string());
+                unsafe {
+                    let _ = InvalidateRect(Some(self.hwnd), None, false);
+                }
+            }
+        }
+    }
+    fn choose_markdown(&mut self) {
+        if let Some(path) = crate::desktop::choose_markdown(self.hwnd) {
+            self.open_markdown(path);
+        }
+    }
     unsafe fn actions_menu(&self) {
         unsafe {
             if let Ok(menu) = CreatePopupMenu() {
@@ -806,6 +905,14 @@ impl App {
                     (210, "Open note trash"),
                     (207, "Quit"),
                 ] {
+                    if !self.options.editor_mode && ![204, 205, 206, 207].contains(&id) {
+                        continue;
+                    }
+                    let label = if !self.options.editor_mode && id == 205 {
+                        "Open Markdown…\tCtrl+O"
+                    } else {
+                        label
+                    };
                     let wide: Vec<u16> = label.encode_utf16().chain([0]).collect();
                     let _ = AppendMenuW(menu, MF_STRING, id, PCWSTR(wide.as_ptr()));
                 }
@@ -834,6 +941,9 @@ impl App {
         }
     }
     fn start_edit(&mut self) {
+        if !self.options.editor_mode {
+            return;
+        }
         if self.editor.is_some() {
             return;
         }
@@ -914,6 +1024,9 @@ impl App {
         true
     }
     fn new_note(&mut self) {
+        if !self.options.editor_mode {
+            return;
+        }
         if !self.finish_edit() {
             return;
         }
@@ -932,13 +1045,17 @@ impl App {
         unsafe {
             if y < 43.0 {
                 if x < 44.0 {
+                    if !self.options.editor_mode {
+                        self.choose_markdown();
+                        return;
+                    }
                     if !self.finish_edit() {
                         return;
                     }
                     self.library = !self.library;
                     self.reflow();
                     self.animate();
-                } else if (48.0..78.0).contains(&x) {
+                } else if self.options.editor_mode && (48.0..78.0).contains(&x) {
                     if self.editor.is_some() {
                         if self.save_edit() {
                             self.editor = None;
@@ -947,7 +1064,7 @@ impl App {
                     } else {
                         self.start_edit();
                     }
-                } else if (86.0..116.0).contains(&x) {
+                } else if self.options.editor_mode && (86.0..116.0).contains(&x) {
                     self.new_note();
                 } else if x > self.width - 42.0 {
                     let _ = PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
@@ -1012,6 +1129,12 @@ impl App {
         }
     }
     fn refresh_notes(&mut self) {
+        if !self.options.editor_mode {
+            if let Some(path) = self.options.file.clone() {
+                self.open_markdown(path);
+            }
+            return;
+        }
         let path = self
             .editor
             .as_ref()
@@ -1057,7 +1180,7 @@ impl App {
             "font_measurements":self.fonts.measurements.get(),"prepare_blocks":self.scene.prepare_passes,
             "layout_passes":self.scene.layout_passes,"paint_count":self.paints,"animation_active":self.motion.active(),
             "lines":self.scene.lines.len(),"width_dip":self.width,"height_dip":self.height,
-            "selected":self.notes.get(self.selected).map(|n| &n.title),"table_cells":self.scene.cells.len(),"images":self.scene.images.len(),"styled_runs":self.scene.lines.iter().map(|l|l.runs.iter().filter(|r|r.style.bold||r.style.italic||r.style.code||r.style.link.is_some()||r.style.strike).count()).sum::<usize>()})
+            "selected":self.notes.get(self.selected).map(|n| &n.title),"read_only":!self.options.editor_mode,"table_cells":self.scene.cells.len(),"images":self.scene.images.len(),"styled_runs":self.scene.lines.iter().map(|l|l.runs.iter().filter(|r|r.style.bold||r.style.italic||r.style.code||r.style.link.is_some()||r.style.strike).count()).sum::<usize>()})
     }
 }
 
@@ -1154,7 +1277,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                     HTLEFT
                 } else if x > right - 6.0 {
                     HTRIGHT
-                } else if y < 45.0 && x > 120.0 && x < right - 118.0 {
+                } else if y < 45.0
+                    && x > if app.options.editor_mode { 120.0 } else { 48.0 }
+                    && x < right - 118.0
+                {
                     HTCAPTION
                 } else {
                     HTCLIENT
@@ -1225,7 +1351,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                         app.reflow();
                         app.animate();
                     }
-                    0x09 => {
+                    0x09 if app.options.editor_mode => {
                         app.library = !app.library;
                         app.reflow();
                         app.animate();
@@ -1316,7 +1442,14 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
             }
             WM_COMMAND => {
                 let command = w.0 & 0xffff;
-                if command == 204 {
+                if !app.options.editor_mode
+                    && [200, 201, 202, 203, 208, 209, 210].contains(&command)
+                {
+                    return LRESULT(0);
+                }
+                if command == 205 && !app.options.editor_mode {
+                    app.choose_markdown();
+                } else if command == 204 {
                     crate::desktop::open_folder(hwnd, &app.options.notes_dir);
                 } else if command == 205 && app.finish_edit() {
                     if let Some(path) = crate::desktop::choose_folder(hwnd) {
@@ -1496,7 +1629,12 @@ pub fn run(options: Options) -> Result<()> {
             let mut app = (*ptr).borrow_mut();
             app.resources()?;
             let title = format!(
-                "Rusty Note — {}",
+                "{} — {}",
+                if app.options.editor_mode {
+                    "Rusty Note"
+                } else {
+                    "MD Sticker"
+                },
                 app.notes
                     .get(app.selected)
                     .map(|note| note.title.as_str())

@@ -1,7 +1,8 @@
 # Rusty Note
 
-Native Rust Markdown notes for Windows 10/11 x64. Rounded cards, real DirectWrite
-font metrics, cached Pretext layout, and event-driven idle. No Electron, browser,
+A simple **read-only Markdown sticker** for Windows 10/11 x64.
+Open a `.md` file, drag the small card onto your desktop, and pin it above other windows.
+Native rounded cards, real DirectWrite font metrics, cached Pretext layout and event-driven idle. No Electron, browser,
 WebView, JavaScript runtime or GPUI framework.
 
 ## Download
@@ -10,7 +11,21 @@ WebView, JavaScript runtime or GPUI framework.
 Extract the portable zip and run **rusty-note.exe**. SHA256 checksums are provided.
 The executable is unsigned; SmartScreen may warn. No installer or autostart change.
 
-## Working features
+## Simple sticker (default)
+
+```powershell
+.\rusty-note.exe "C:\path\note.md"
+```
+
+Or launch without arguments and click **↑ / Ctrl+O** to open Markdown.
+**P** toggles always-on-top, **◐** changes theme, **×** closes. Drag the header to move;
+resize the edges, wheel/PageUp/PageDown scroll, **F5** reloads. The viewer does not edit,
+rename, create, save or trash Markdown, even through the old editor commands.
+Default size: 360x500. Last file/placement use `%LOCALAPPDATA%\RustyNote\sticker-state.json`.
+
+The old editor remains opt-in with `--editor`; it is not part of the default sticker UI.
+
+## Shared renderer / optional editor features
 
 - Headings, paragraphs, bold/italic/strike, inline code, safe clickable web/mail links.
 - Ordered/bullet/nested/task lists, quotes, horizontal rules and whitespace-preserving code.
@@ -25,7 +40,7 @@ The executable is unsigned; SmartScreen may warn. No installer or autostart chan
 - Native folder-change notifications refresh notes without a polling timer.
 - Cached native font advances reused on resize; animation timers stop after transitions.
 
-## Use
+## Optional editor (`--editor`)
 
 Default notes: `%USERPROFILE%\Documents\Rusty Note`.
 App state: `%LOCALAPPDATA%\RustyNote\state.json`.
