@@ -1,0 +1,16 @@
+name: Windows native checks
+on: [push, pull_request]
+jobs:
+  native:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo test --locked
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo build --locked --release
+      # HWND capture requires an interactive desktop. The CPU/layout unit
+      # regressions run in CI; scripts/validate.ps1 is an interactive local check.
