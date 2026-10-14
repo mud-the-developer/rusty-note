@@ -58,6 +58,7 @@ pub struct State {
     pub light: bool,
     pub selected: Option<PathBuf>,
     pub notes_dir: Option<PathBuf>,
+    pub scroll: f32,
 }
 impl Default for State {
     fn default() -> Self {
@@ -70,6 +71,7 @@ impl Default for State {
             light: false,
             selected: None,
             notes_dir: None,
+            scroll: 0.0,
         }
     }
 }
@@ -86,6 +88,11 @@ impl State {
                 state.height = state.height.clamp(420, 1600);
                 state.x = state.x.clamp(-32000, 32000);
                 state.y = state.y.clamp(-32000, 32000);
+                state.scroll = if state.scroll.is_finite() {
+                    state.scroll.max(0.0)
+                } else {
+                    0.0
+                };
                 state
             })
             .unwrap_or_default()
@@ -107,5 +114,21 @@ mod tests {
         let state: State = serde_json::from_str("{}").unwrap();
         assert_eq!(state.width, 460);
         assert!(state.pinned);
+        assert_eq!(state.scroll, 0.0);
+    }
+    #[test]
+    fn reading_position_round_trips_without_changing_old_state_defaults() {
+        let root = std::env::temp_dir().join(format!("rusty-reading-state-{}", std::process::id()));
+        let path = root.join("state.json");
+        let state = State {
+            scroll: 420.0,
+            selected: Some(PathBuf::from("view.md")),
+            ..Default::default()
+        };
+        state.save(&path).unwrap();
+        let loaded = State::load(&path);
+        assert_eq!(loaded.scroll, 420.0);
+        assert_eq!(loaded.selected, state.selected);
+        fs::remove_dir_all(root).unwrap();
     }
 }

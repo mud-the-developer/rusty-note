@@ -167,6 +167,7 @@ struct App {
     height: f32,
     scale: f32,
     scroll: f32,
+    scroll_drag: Option<f32>,
     paints: u64,
     error: Option<String>,
     editor: Option<crate::editor::Editor>,
@@ -232,6 +233,19 @@ impl App {
             let viewer_source = (!options.editor_mode).then(|| source.clone());
             let mut scene = Scene::new(&Document::parse(&source), &fonts);
             scene.reflow(state.width as f32 - 72.0);
+            let scroll = if !options.editor_mode
+                && notes
+                    .get(selected)
+                    .is_some_and(|note| state.selected.as_ref() == Some(&note.path))
+            {
+                crate::viewer::reload_scroll(
+                    state.scroll,
+                    scene.height,
+                    state.height as f32 - 160.0,
+                )
+            } else {
+                0.0
+            };
             let mut motion = Motion::default();
             motion.reduced = options.reduced_motion;
             Ok(Self {
@@ -251,7 +265,8 @@ impl App {
                 width: 460.0,
                 height: 700.0,
                 scale: 1.0,
-                scroll: 0.0,
+                scroll,
+                scroll_drag: None,
                 paints: 0,
                 editor: None,
                 images: crate::images::Images::new()?,
@@ -311,7 +326,15 @@ impl App {
             .iter()
             .enumerate()
             {
-                if x >= *left && x < *left + 30.0 {
+                if !self.options.editor_mode && [1, 2].contains(&i) {
+                    continue;
+                }
+                let width = if !self.options.editor_mode && i == 0 {
+                    56.0
+                } else {
+                    30.0
+                };
+                if x >= *left && x < *left + width {
                     return i as i32;
                 }
             }
@@ -327,6 +350,20 @@ impl App {
     fn reflow(&mut self) {
         self.scene
             .reflow((self.width - self.content_x() - 28.0).max(48.0));
+        self.scroll =
+            crate::viewer::reload_scroll(self.scroll, self.scene.height, self.height - 160.0);
+    }
+    fn reading_hint(&self) -> &str {
+        if self.options.editor_mode {
+            return "CACHED LAYOUT  ·  EVENT-DRIVEN  ·  RUST";
+        }
+        match self.hover_region(self.hover) {
+            0 => "Open Markdown  ·  Ctrl+O or drop a file",
+            3 => "Always on top  ·  P",
+            4 => "Light / dark theme  ·  T",
+            5 => "Close this sticker",
+            _ => "READ ONLY  ·  Ctrl+O OPEN  ·  F5 RELOAD",
+        }
     }
     unsafe fn animate(&mut self) {
         unsafe {
@@ -348,6 +385,11 @@ impl App {
             }
             self.state.selected = self.notes.get(self.selected).map(|n| n.path.clone());
             self.state.notes_dir = Some(self.options.notes_dir.clone());
+            self.state.scroll = if self.options.editor_mode {
+                0.0
+            } else {
+                self.scroll
+            };
             if let Err(error) = self.state.save(&self.options.state_file) {
                 eprintln!("state save: {error}");
             }
@@ -545,14 +587,14 @@ impl App {
                     if self.options.editor_mode {
                         126.0
                     } else {
-                        64.0
+                        82.0
                     },
                     17.0,
                     (self.width
                         - if self.options.editor_mode {
                             246.0
                         } else {
-                            188.0
+                            206.0
                         })
                     .max(0.0),
                     20.0,
@@ -594,7 +636,7 @@ impl App {
                     if self.options.editor_mode {
                         "≡"
                     } else {
-                        "↑"
+                        "Open"
                     },
                     self.library,
                 ),
@@ -611,9 +653,12 @@ impl App {
                 if !self.options.editor_mode && (48.0..116.0).contains(&x) {
                     continue;
                 }
-                let hovered = self.hover.0 >= x && self.hover.0 < x + 30.0 && self.hover.1 < 43.0;
+                let open_button = !self.options.editor_mode && x == 12.0;
+                let button_width = if open_button { 56.0 } else { 30.0 };
+                let hovered =
+                    self.hover.0 >= x && self.hover.0 < x + button_width && self.hover.1 < 43.0;
                 self.fill(
-                    rect(x, 9.0, 30.0, 30.0),
+                    rect(x, 9.0, button_width, 30.0),
                     8.0,
                     if on { palette.accent } else { palette.line },
                     if on {
@@ -627,11 +672,16 @@ impl App {
                 self.text(
                     text,
                     Font {
-                        size: 17,
-                        bold: false,
+                        size: if open_button { 13 } else { 17 },
+                        bold: open_button,
                         mono: false,
                     },
-                    rect(x + 8.0, 12.0, 23.0, 25.0),
+                    rect(
+                        x + 8.0,
+                        if open_button { 15.0 } else { 12.0 },
+                        button_width - 9.0,
+                        25.0,
+                    ),
                     if on { palette.accent } else { palette.ink },
                     1.0,
                 )?;
@@ -826,29 +876,33 @@ impl App {
             }
             target.PopAxisAlignedClip();
             self.text(
-                self.error
-                    .as_deref()
-                    .unwrap_or(if self.options.editor_mode {
-                        "CACHED LAYOUT  ·  EVENT-DRIVEN  ·  RUST"
-                    } else {
-                        "READ ONLY  ·  Ctrl+O OPEN  ·  F5 RELOAD"
-                    }),
+                self.error.as_deref().unwrap_or(self.reading_hint()),
                 tiny,
                 rect(27.0, self.height - 34.0, self.width - 60.0, 20.0),
                 palette.muted,
                 1.0,
             )?;
-            let visible = (self.height - 160.0).max(100.0);
-            if self.scene.height > visible {
-                let track = self.height - 158.0;
-                let thumb = (track * visible / self.scene.height).max(24.0);
-                let position =
-                    self.scroll / (self.scene.height - visible).max(1.0) * (track - thumb);
+            if let Some(bar) = crate::viewer::Scrollbar::new(self.scene.height, self.height) {
                 self.fill(
-                    rect(self.width - 15.0, 111.0 + position, 3.0, thumb),
-                    1.5,
+                    rect(self.width - 20.0, bar.top, 8.0, bar.track),
+                    4.0,
+                    palette.line,
+                    0.35,
+                );
+                self.fill(
+                    rect(
+                        self.width - 20.0,
+                        bar.thumb_top(self.scroll),
+                        8.0,
+                        bar.thumb,
+                    ),
+                    4.0,
                     palette.accent,
-                    0.45,
+                    if self.scroll_drag.is_some() {
+                        0.85
+                    } else {
+                        0.55
+                    },
                 );
             }
             let result = target.EndDraw(None, None);
@@ -1065,7 +1119,7 @@ impl App {
     unsafe fn click(&mut self, x: f32, y: f32) {
         unsafe {
             if y < 43.0 {
-                if x < 44.0 {
+                if x < if self.options.editor_mode { 44.0 } else { 72.0 } {
                     if !self.options.editor_mode {
                         self.choose_markdown();
                         return;
@@ -1201,7 +1255,7 @@ impl App {
             "font_measurements":self.fonts.measurements.get(),"prepare_blocks":self.scene.prepare_passes,
             "layout_passes":self.scene.layout_passes,"paint_count":self.paints,"animation_active":self.motion.active(),
             "lines":self.scene.lines.len(),"width_dip":self.width,"height_dip":self.height,
-            "selected":self.notes.get(self.selected).map(|n| &n.title),"read_only":!self.options.editor_mode,"scroll":self.scroll,"error":self.error,"table_cells":self.scene.cells.len(),"images":self.scene.images.len(),"styled_runs":self.scene.lines.iter().map(|l|l.runs.iter().filter(|r|r.style.bold||r.style.italic||r.style.code||r.style.link.is_some()||r.style.strike).count()).sum::<usize>()})
+            "selected":self.notes.get(self.selected).map(|n| &n.title),"read_only":!self.options.editor_mode,"scroll":self.scroll,"pinned":self.state.pinned,"light":self.state.light,"hint":self.reading_hint(),"scroll_thumb_top":crate::viewer::Scrollbar::new(self.scene.height,self.height).map(|bar|bar.thumb_top(self.scroll)),"scroll_thumb_size":crate::viewer::Scrollbar::new(self.scene.height,self.height).map(|bar|bar.thumb),"scale":self.scale,"error":self.error,"table_cells":self.scene.cells.len(),"images":self.scene.images.len(),"styled_runs":self.scene.lines.iter().map(|l|l.runs.iter().filter(|r|r.style.bold||r.style.italic||r.style.code||r.style.link.is_some()||r.style.strike).count()).sum::<usize>()})
     }
 }
 
@@ -1340,7 +1394,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                 } else if x > right - 6.0 {
                     HTRIGHT
                 } else if y < 45.0
-                    && x > if app.options.editor_mode { 120.0 } else { 48.0 }
+                    && x > if app.options.editor_mode { 120.0 } else { 76.0 }
                     && x < right - 118.0
                 {
                     HTCAPTION
@@ -1370,6 +1424,16 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                     dwHoverTime: 0,
                 };
                 let _ = TrackMouseEvent(&track as *const _ as *mut _);
+                if let Some(grab) = app.scroll_drag
+                    && let Some(bar) = crate::viewer::Scrollbar::new(app.scene.height, app.height)
+                {
+                    let scroll = bar.scroll_at(app.hover.1, grab);
+                    if scroll != app.scroll {
+                        app.scroll = scroll;
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                    }
+                    return LRESULT(0);
+                }
                 if old_region != app.hover_region(app.hover) {
                     let _ = InvalidateRect(Some(hwnd), None, false);
                 }
@@ -1384,7 +1448,42 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                 }
                 LRESULT(0)
             }
+            WM_LBUTTONDOWN => {
+                let x = (l.0 as u32 & 0xffff) as i16 as f32 / app.scale;
+                let y = ((l.0 as u32 >> 16) & 0xffff) as i16 as f32 / app.scale;
+                if app.editor.is_none()
+                    && let Some(bar) = crate::viewer::Scrollbar::new(app.scene.height, app.height)
+                    && x >= app.width - 25.0
+                    && x <= app.width - 5.0
+                    && y >= bar.top
+                    && y <= bar.top + bar.track
+                {
+                    let top = bar.thumb_top(app.scroll);
+                    let grab = if y >= top && y <= top + bar.thumb {
+                        y - top
+                    } else {
+                        bar.thumb / 2.0
+                    };
+                    app.scroll_drag = Some(grab);
+                    app.scroll = bar.scroll_at(y, grab);
+                    let _ = SetCapture(hwnd);
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
+                LRESULT(0)
+            }
+            WM_CAPTURECHANGED | WM_CANCELMODE => {
+                if app.scroll_drag.take().is_some() {
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
+                LRESULT(0)
+            }
             WM_LBUTTONUP => {
+                if app.scroll_drag.take().is_some() {
+                    drop(app);
+                    let _ = ReleaseCapture();
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                    return LRESULT(0);
+                }
                 let x = (l.0 as u32 & 0xffff) as i16 as f32 / app.scale;
                 let y = ((l.0 as u32 >> 16) & 0xffff) as i16 as f32 / app.scale;
                 app.click(x, y);
@@ -1425,17 +1524,34 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                         if app.options.editor_mode {
                             let index = app.selected;
                             app.select(index);
-                        } else {
-                            app.refresh_notes();
+                        } else if let Some(path) = app.options.file.clone() {
+                            app.open_markdown(path, true);
                         }
                     }
-                    0x27 => {
+                    0x27 if app.options.editor_mode => {
                         let index = (app.selected + 1) % app.notes.len().max(1);
                         app.select(index);
                     }
-                    0x25 => {
+                    0x25 if app.options.editor_mode => {
                         let index = app.selected.saturating_sub(1);
                         app.select(index);
+                    }
+                    0x50 if !app.options.editor_mode => {
+                        let width = app.width;
+                        app.click(width - 100.0, 20.0);
+                    }
+                    0x54 if !app.options.editor_mode => {
+                        let width = app.width;
+                        app.click(width - 64.0, 20.0);
+                    }
+                    0x26 | 0x28 if !app.options.editor_mode => {
+                        let delta = if w.0 == 0x28 { 32.0 } else { -32.0 };
+                        app.scroll = crate::viewer::reload_scroll(
+                            app.scroll + delta,
+                            app.scene.height,
+                            app.height - 160.0,
+                        );
+                        let _ = InvalidateRect(Some(hwnd), None, false);
                     }
                     0x21 | 0x22 => {
                         let delta =

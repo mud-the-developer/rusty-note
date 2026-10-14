@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.3 — reader controls and resume
+
+- Clear Open label and per-control hover help without a tooltip polling timer.
+- Wider draggable scrollbar with track clicking and pointer capture.
+- P/T keyboard pin/theme controls and up/down reading scroll.
+- Left/right keys no longer reload the single read-only file or reset its position.
+- Clamp reading offset after resize, avoiding a blank view beyond the document.
+- Persist/restore reading position for the same file; different files start at the top.
+- F5 clears resolved read errors without discarding the reading offset.
+- Mixed reader-controls fixture, scrollbar/state regressions and native light/dark
+  input, close/reopen, file-override, font-cache and source-byte checks.
+
 ## 0.3.2 — reference-informed viewer polish
 
 - Used pinned REA to inspect two public reference app structures; documented source findings,

@@ -1,5 +1,25 @@
 # Simple read-only sticker checks
 
+## 0.3.3 reader usability
+
+Twenty-four core tests passed, including scrollbar endpoint/grab-offset mapping
+(with subpixel float tolerance) and backward-compatible reading-state round trips.
+Native copied-fixture tests exercise P/T and arrow keys, no left/right reload,
+actual captured scrollbar dragging without extra font measurements, source-byte
+protection, idle paints and close/reopen reading resume. A different file override
+must reset scroll. Mixed `reader-controls.md` combines heading/list/quote/table/code,
+emphasis, links, Korean and emoji; both normal/narrow light/dark captures were checked.
+
+Open/help and enlarged scrollbar captures were inspected, including the final
+paragraph after dragging and restored table position. For hover, the test briefly
+moves the pointer only inside the verified owned HWND (no click), then immediately
+restores its original coordinates. A synthetic move alone triggered WM_MOUSELEAVE
+because the real pointer was elsewhere; that was a driver issue, not a UI pass.
+
+No source autosave/settings panel/updater/installer was added. Physical Explorer
+input, assistive-technology completeness, multi-instance state-save stress and live
+multi-monitor DPI transitions remain outside this check. Outputs remain ignored.
+
 ## 0.3.2 reference-informed polish
 
 See [reference review](reference-review.md) for actual REA commands, pinned reference

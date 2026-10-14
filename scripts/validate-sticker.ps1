@@ -9,7 +9,7 @@ Copy-Item (Join-Path $root 'tests/fixtures/sticky-viewer.md') $md
 $before=[IO.File]::ReadAllBytes($md)
 $dropName=([string][char]0xD55C)+([string][char]0xAE00)+' '+([string][char]0xB4DC)+([string][char]0xB86D)
 $dropMd=Join-Path $out ($dropName+'.md')
-Copy-Item (Join-Path $root 'tests/fixtures/viewer-polish.md') $dropMd
+Copy-Item (Join-Path $root 'tests/fixtures/reader-controls.md') $dropMd
 $dropBefore=[IO.File]::ReadAllBytes($dropMd)
 Add-Type -AssemblyName System.Drawing
 Add-Type @'
@@ -29,6 +29,9 @@ public static class StickerProbe {
  [StructLayout(LayoutKind.Sequential)] public struct RECT{public int L,T,R,B;}
  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h,out RECT r);
  [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h,IntPtr dc,uint f);
+ [StructLayout(LayoutKind.Sequential)] public struct POINT{public int X,Y;}
+ [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
+ [DllImport("user32.dll")] public static extern bool SetCursorPos(int x,int y);
  [DllImport("user32.dll")] static extern IntPtr MonitorFromWindow(IntPtr h,uint flags);
  [StructLayout(LayoutKind.Sequential)] struct MONITORINFO{public uint Size;public RECT Monitor,Work;public uint Flags;}
  [DllImport("user32.dll")] static extern bool GetMonitorInfoW(IntPtr h,ref MONITORINFO info);
@@ -37,6 +40,7 @@ public static class StickerProbe {
 }
 '@
 $null=[StickerProbe]::SetThreadDpiAwarenessContext([IntPtr](-4))
+function PointParam([int]$x,[int]$y){return [IntPtr](($y -shl 16) -bor ($x -band 0xffff))}
 function Capture([IntPtr]$hwnd,[string]$path){$r=New-Object StickerProbe+RECT;if(![StickerProbe]::GetWindowRect($hwnd,[ref]$r)){throw 'Owned sticker missing'};$bitmap=New-Object Drawing.Bitmap ($r.R-$r.L),($r.B-$r.T);$g=[Drawing.Graphics]::FromImage($bitmap);$dc=$g.GetHdc();try{if(![StickerProbe]::PrintWindow($hwnd,$dc,2)){throw 'Owned capture failed'}}finally{$g.ReleaseHdc($dc);$g.Dispose()};try{$bitmap.Save($path,[Drawing.Imaging.ImageFormat]::Png)}finally{$bitmap.Dispose()}}
 foreach($theme in @('dark','light')){
  $state=Join-Path $out "$theme-state.json";$metrics=Join-Path $out "$theme-metrics.json"
@@ -55,6 +59,22 @@ foreach($theme in @('dark','light')){
   $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$narrow=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
   if($narrow.font_measurements -ne $first.font_measurements){throw 'Sticker resize remeasured fonts'}
   Capture $hwnd (Join-Path $out "$theme-narrow.png")
+  # Hover only inside the verified owned window; restore the pointer immediately.
+  $oldPoint=New-Object StickerProbe+POINT;$null=[StickerProbe]::GetCursorPos([ref]$oldPoint)
+  $owned=New-Object StickerProbe+RECT;if(![StickerProbe]::GetWindowRect($hwnd,[ref]$owned)){throw 'Owned hover target missing'}
+  try{$null=[StickerProbe]::SetCursorPos($owned.L+28,$owned.T+20);Start-Sleep -Milliseconds 100
+   $null=[StickerProbe]::SendMessageW($hwnd,0x200,[IntPtr]::Zero,(PointParam 28 20))
+   $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$hovered=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+   if($hovered.hint -notlike 'Open Markdown*'){throw 'Open control help missing'}
+   Capture $hwnd (Join-Path $out "$theme-open-help.png")
+  }finally{$null=[StickerProbe]::SetCursorPos($oldPoint.X,$oldPoint.Y)}
+  $null=[StickerProbe]::SendMessageW($hwnd,0x100,[IntPtr]0x50,[IntPtr]::Zero)
+  $null=[StickerProbe]::SendMessageW($hwnd,0x100,[IntPtr]0x54,[IntPtr]::Zero)
+  $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$keys=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+  if($keys.pinned -eq $narrow.pinned -or $keys.light -eq $narrow.light){throw 'Pin/theme keyboard shortcuts failed'}
+  $null=[StickerProbe]::SendMessageW($hwnd,0x100,[IntPtr]0x50,[IntPtr]::Zero)
+  $null=[StickerProbe]::SendMessageW($hwnd,0x100,[IntPtr]0x54,[IntPtr]::Zero)
+  $null=[StickerProbe]::SendMessageW($hwnd,0x200,[IntPtr]::Zero,(PointParam 150 80))
   foreach($id in @(200,201,202,203,208,209,210)){$null=[StickerProbe]::SendMessageW($hwnd,0x111,[IntPtr]$id,[IntPtr]::Zero)}
   if([StickerProbe]::GetDlgItem($hwnd,100) -ne [IntPtr]::Zero){throw 'Viewer entered editor'}
   $null=[StickerProbe]::SendMessageW($hwnd,0x100,[IntPtr]0x09,[IntPtr]::Zero)
@@ -68,6 +88,25 @@ foreach($theme in @('dark','light')){
   $null=[StickerProbe]::SendMessageW($hwnd,0x100,[IntPtr]0x22,[IntPtr]::Zero)
   $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$scrolled=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
   if($scrolled.scroll -le 0){throw 'Mixed reload fixture did not scroll'}
+  $null=[StickerProbe]::SendMessageW($hwnd,0x100,[IntPtr]0x25,[IntPtr]::Zero)
+  $null=[StickerProbe]::SendMessageW($hwnd,0x100,[IntPtr]0x27,[IntPtr]::Zero)
+  $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$arrows=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+  if($arrows.scroll -ne $scrolled.scroll -or $arrows.font_measurements -ne $scrolled.font_measurements){throw 'Left/right arrow reset read-only document'}
+  $thumbX=[int](($scrolled.width_dip-16)*$scrolled.scale);$thumbY=[int](($scrolled.scroll_thumb_top+5)*$scrolled.scale)
+  $null=[StickerProbe]::SendMessageW($hwnd,0x201,[IntPtr]1,(PointParam $thumbX $thumbY))
+  $null=[StickerProbe]::SendMessageW($hwnd,0x200,[IntPtr]1,(PointParam $thumbX ([int](($scrolled.height_dip-55)*$scrolled.scale))))
+  $null=[StickerProbe]::SendMessageW($hwnd,0x202,[IntPtr]::Zero,(PointParam $thumbX ([int](($scrolled.height_dip-55)*$scrolled.scale))))
+  $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$dragged=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+  if($dragged.scroll -le $scrolled.scroll -or $dragged.font_measurements -ne $scrolled.font_measurements){throw 'Scrollbar drag did not advance cached reading view'}
+  Capture $hwnd (Join-Path $out "$theme-scroll-drag.png")
+  $null=[StickerProbe]::SendMessageW($hwnd,0x100,[IntPtr]0x26,[IntPtr]::Zero)
+  $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$up=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+  if($up.scroll -ge $dragged.scroll){throw 'Up arrow did not scroll'}
+  $null=[StickerProbe]::SendMessageW($hwnd,0x100,[IntPtr]0x28,[IntPtr]::Zero)
+  # Use an interior reading position for the later external-refresh checks.
+  $null=[StickerProbe]::SendMessageW($hwnd,0x100,[IntPtr]0x24,[IntPtr]::Zero)
+  $null=[StickerProbe]::SendMessageW($hwnd,0x100,[IntPtr]0x22,[IntPtr]::Zero)
+  $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$scrolled=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
   [IO.File]::WriteAllText((Join-Path $out 'unrelated.tmp'),'unrelated');Start-Sleep -Milliseconds 250
   $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$unchanged=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
   if($unchanged.font_measurements -ne $scrolled.font_measurements -or $unchanged.scroll -ne $scrolled.scroll){throw 'Unrelated folder change reparsed/reset reading position'}
@@ -85,7 +124,20 @@ foreach($theme in @('dark','light')){
   if([Convert]::ToBase64String([IO.File]::ReadAllBytes($md)) -ne [Convert]::ToBase64String($before)){throw 'Viewer changed source Markdown'}
   if([Convert]::ToBase64String([IO.File]::ReadAllBytes($dropMd)) -ne [Convert]::ToBase64String($dropBefore)){throw 'Viewer changed dropped Markdown'}
   if((Get-ChildItem $out -Filter '*.md').Count -ne 2 -or (Get-ChildItem $out -Filter '*.bak').Count -ne 0){throw 'Viewer created source files'}
-  Write-Output "$theme read-only sticker passed; idle CPU $delta ms; working set $([math]::Round($p.WorkingSet64/1MB,2)) MiB"
+  $restoreScroll=$after.scroll
+  $null=[StickerProbe]::PostMessageW($hwnd,0x10,[IntPtr]::Zero,[IntPtr]::Zero)
+  if(!$p.WaitForExit(10000)){throw 'Sticker close before restore failed'}
+  $p=Start-Process -FilePath $exe -ArgumentList @('--state-file',('"'+$state+'"'),'--metrics-file',('"'+$metrics+'"')) -PassThru
+  if(!$p.WaitForInputIdle(15000)){throw 'Restored sticker not ready'};$hwnd=[StickerProbe]::Find($p.Id);Start-Sleep -Milliseconds 350
+  $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$restored=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+  if($restored.selected -ne $dropName -or [math]::Abs($restored.scroll-$restoreScroll) -gt 0.01){throw 'Reading position did not survive close/reopen'}
+  Capture $hwnd (Join-Path $out "$theme-restored.png")
+  $null=[StickerProbe]::PostMessageW($hwnd,0x10,[IntPtr]::Zero,[IntPtr]::Zero);if(!$p.WaitForExit(10000)){throw 'Restore validation close failed'}
+  $p=Start-Process -FilePath $exe -ArgumentList @(('"'+$md+'"'),'--state-file',('"'+$state+'"'),'--metrics-file',('"'+$metrics+'"')) -PassThru
+  if(!$p.WaitForInputIdle(15000)){throw 'Different-file sticker not ready'};$hwnd=[StickerProbe]::Find($p.Id);Start-Sleep -Milliseconds 350
+  $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$other=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+  if($other.selected -ne 'Sticker' -or $other.scroll -ne 0){throw 'Different file inherited the saved reading offset'}
+  Write-Output "$theme read-only usability checks passed; idle CPU $delta ms"
  }finally{if(!$p.HasExited){$null=[StickerProbe]::PostMessageW([StickerProbe]::Find($p.Id),0x10,[IntPtr]::Zero,[IntPtr]::Zero);if(!$p.WaitForExit(10000)){Stop-Process -Id $p.Id -Force;throw 'Owned sticker did not close'}}}
 }
 Write-Output "Sticker validation passed. Artifacts: $out"

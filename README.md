@@ -17,11 +17,14 @@ The executable is unsigned; SmartScreen may warn. No installer or autostart chan
 .\rusty-note.exe "C:\path\note.md"
 ```
 
-Or launch without arguments, **drop one `.md` file**, or click **↑ / Ctrl+O** to open Markdown.
-**P** toggles always-on-top, **◐** changes theme, **×** closes. Drag the header to move;
-resize the edges, wheel/PageUp/PageDown scroll, **F5** reloads. The viewer does not edit,
+Or launch without arguments, **drop one `.md` file**, or click **Open / Ctrl+O** to open Markdown.
+**P** toggles always-on-top (button or key), **◐ / T** changes theme, **×** closes.
+Hover controls for status-bar help. Drag the header to move; resize the edges.
+Drag/click the right-hand scrollbar or use wheel/↑/↓/PageUp/PageDown to read; **F5** reloads. The viewer does not edit,
 rename, create, save or trash Markdown, even through the old editor commands.
-Default size: 360x500. Last file/placement use `%LOCALAPPDATA%\RustyNote\sticker-state.json`.
+Default size: 360x500. Last file/placement/reading position use
+`%LOCALAPPDATA%\RustyNote\sticker-state.json`. Reopening the same file resumes reading;
+opening a different file starts at the top.
 
 External changes refresh the document without losing your reading position. Unrelated
 folder changes do not remeasure fonts. Old/off-screen placement is recovered into the
