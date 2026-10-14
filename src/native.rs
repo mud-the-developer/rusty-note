@@ -4,6 +4,7 @@ use crate::{
     motion::Motion,
     store::{self, Note, State},
 };
+use pulldown_cmark::Alignment;
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -461,20 +462,23 @@ impl App {
             );
         }
     }
-    unsafe fn line_layout(
-        &self,
-        line: &crate::layout::Line,
-        width: f32,
-    ) -> Result<IDWriteTextLayout> {
+    unsafe fn line_layout(&self, line: &crate::layout::Line) -> Result<IDWriteTextLayout> {
         unsafe {
             let wide: Vec<u16> = line.text.encode_utf16().collect();
             let format = self.fonts.format(line.font)?;
-            let layout = self.fonts.factory.CreateTextLayout(
-                &wide,
-                &format,
-                width.max(16.0),
-                line.height + 4.0,
-            )?;
+            let width = line
+                .layout_width
+                .min(self.width - self.content_x() - 28.0 - line.x)
+                .max(1.0);
+            let layout =
+                self.fonts
+                    .factory
+                    .CreateTextLayout(&wide, &format, width, line.height + 4.0)?;
+            layout.SetTextAlignment(match line.alignment {
+                Alignment::Center => DWRITE_TEXT_ALIGNMENT_CENTER,
+                Alignment::Right => DWRITE_TEXT_ALIGNMENT_TRAILING,
+                _ => DWRITE_TEXT_ALIGNMENT_LEADING,
+            })?;
             for run in &line.runs {
                 let start = line.text[..run.start].encode_utf16().count() as u32;
                 let range = DWRITE_TEXT_RANGE {
@@ -498,28 +502,6 @@ impl App {
                 }
             }
             Ok(layout)
-        }
-    }
-    unsafe fn rich_text(
-        &self,
-        line: &crate::layout::Line,
-        x: f32,
-        y: f32,
-        width: f32,
-        rgb: u32,
-        alpha: f32,
-    ) -> Result<()> {
-        unsafe {
-            let layout = self.line_layout(line, width)?;
-            let brush = self.brush.as_ref().unwrap();
-            brush.SetColor(&color(rgb, alpha));
-            self.target.as_ref().unwrap().DrawTextLayout(
-                Vector2 { X: x, Y: y },
-                &layout,
-                brush,
-                D2D1_DRAW_TEXT_OPTIONS_CLIP,
-            );
-            Ok(())
         }
     }
     unsafe fn text(
@@ -878,16 +860,22 @@ impl App {
                         0.65 * progress,
                     );
                 }
+                let layout = self.line_layout(line)?;
                 if self
                     .search_hits
                     .get(self.search_index)
                     .is_some_and(|hit| hit.lines.contains(&line_index))
                 {
+                    let mut metrics = DWRITE_TEXT_METRICS::default();
+                    layout.GetMetrics(&mut metrics)?;
+                    let left = metrics.left.max(0.0);
+                    let right = (metrics.left + metrics.widthIncludingTrailingWhitespace)
+                        .min(layout.GetMaxWidth());
                     self.fill(
                         rect(
-                            content_x + inset - 2.0,
+                            content_x + inset + left,
                             y,
-                            (line.width + 4.0).min(self.width - content_x - inset - 26.0),
+                            (right - left).max(0.0),
                             line.height,
                         ),
                         3.0,
@@ -901,14 +889,17 @@ impl App {
                     Kind::Quote => palette.muted,
                     _ => palette.ink,
                 };
-                self.rich_text(
-                    line,
-                    content_x + inset,
-                    y,
-                    (line.width + 3.0).min(self.width - content_x - 28.0 - inset),
-                    rgb,
-                    progress,
-                )?;
+                let brush = self.brush.as_ref().unwrap();
+                brush.SetColor(&color(rgb, progress));
+                target.DrawTextLayout(
+                    Vector2 {
+                        X: content_x + inset,
+                        Y: y,
+                    },
+                    &layout,
+                    brush,
+                    D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                );
             }
             target.PopAxisAlignedClip();
             let size_hint = format!(
@@ -1349,41 +1340,8 @@ impl App {
                 self.show_error();
             } else if self.library && x < 160.0 && y >= 112.0 {
                 self.select(self.library_scroll + ((y - 112.0) / 48.0) as usize);
-            } else if self.editor.is_none() {
-                let local_y = y - 116.0 + self.scroll;
-                if let Some(line) = self
-                    .scene
-                    .lines
-                    .iter()
-                    .find(|line| local_y >= line.y && local_y < line.y + line.height)
-                    && let Ok(layout) = self.line_layout(line, (line.width + 3.0).max(16.0))
-                {
-                    let mut trailing = windows::core::BOOL::default();
-                    let mut inside = windows::core::BOOL::default();
-                    let mut metrics = DWRITE_HIT_TEST_METRICS::default();
-                    if layout
-                        .HitTestPoint(
-                            x - self.content_x() - line.x,
-                            local_y - line.y,
-                            &mut trailing,
-                            &mut inside,
-                            &mut metrics,
-                        )
-                        .is_ok()
-                        && inside.as_bool()
-                    {
-                        for run in &line.runs {
-                            let start = line.text[..run.start].encode_utf16().count() as u32;
-                            let end = line.text[..run.end].encode_utf16().count() as u32;
-                            if metrics.textPosition >= start
-                                && metrics.textPosition < end
-                                && let Some(url) = &run.style.link
-                            {
-                                crate::desktop::open_link(self.hwnd, url);
-                            }
-                        }
-                    }
-                }
+            } else if let Some(url) = self.link_at(x, y) {
+                crate::desktop::open_link(self.hwnd, url);
             }
         }
     }
@@ -1434,8 +1392,65 @@ impl App {
             Err(error) => self.error = Some(error.to_string()),
         }
     }
+    unsafe fn link_at(&self, x: f32, y: f32) -> Option<&str> {
+        unsafe {
+            if self.editor.is_some()
+                || y < 106.0
+                || y > self.height - 46.0
+                || x < self.content_x()
+                || x > self.width - 28.0
+            {
+                return None;
+            }
+            let local_y = y - 116.0 + self.scroll;
+            for line in &self.scene.lines {
+                let local_x = x - self.content_x() - line.x;
+                if local_y < line.y
+                    || local_y >= line.y + line.height
+                    || local_x < 0.0
+                    || local_x > line.layout_width
+                {
+                    continue;
+                }
+                let Ok(layout) = self.line_layout(line) else {
+                    continue;
+                };
+                let mut trailing = windows::core::BOOL::default();
+                let mut inside = windows::core::BOOL::default();
+                let mut hit = DWRITE_HIT_TEST_METRICS::default();
+                if layout
+                    .HitTestPoint(
+                        local_x,
+                        local_y - line.y,
+                        &mut trailing,
+                        &mut inside,
+                        &mut hit,
+                    )
+                    .is_err()
+                    || !inside.as_bool()
+                {
+                    continue;
+                }
+                for run in &line.runs {
+                    let start = line.text[..run.start].encode_utf16().count() as u32;
+                    let end = line.text[..run.end].encode_utf16().count() as u32;
+                    if hit.textPosition >= start
+                        && hit.textPosition < end
+                        && let Some(url) = run.style.link.as_deref()
+                    {
+                        return Some(url);
+                    }
+                }
+            }
+            None
+        }
+    }
     fn metrics(&self) -> serde_json::Value {
-        serde_json::json!({"backend":"Direct2D + DirectWrite", "layout":"gpui-pretext 0.6.2", "notes":self.notes.len(),
+        let table_geometry:Vec<_>=self.scene.lines.iter().enumerate().filter(|(_,line)|line.kind==Kind::Table).filter_map(|(index,line)|unsafe {
+            let layout=self.line_layout(line).ok()?;let mut metrics=DWRITE_TEXT_METRICS::default();layout.GetMetrics(&mut metrics).ok()?;
+            Some(serde_json::json!({"line":index,"origin":line.origin,"x":self.content_x()+line.x,"y":116.0+line.y-self.scroll,"height":line.height,"box_width":layout.GetMaxWidth(),"ink_left":metrics.left,"ink_width":metrics.width,"alignment":format!("{:?}",line.alignment),"linked":line.runs.iter().any(|r|r.style.link.is_some())}))
+        }).collect();
+        serde_json::json!({"table_geometry":table_geometry,"backend":"Direct2D + DirectWrite", "layout":"gpui-pretext 0.6.2", "notes":self.notes.len(),
             "font_measurements":self.fonts.measurements.get(),"prepare_blocks":self.scene.prepare_passes,
             "layout_passes":self.scene.layout_passes,"paint_count":self.paints,"animation_active":self.motion.active(),
             "lines":self.scene.lines.len(),"width_dip":self.width,"height_dip":self.height,
@@ -1801,6 +1816,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                 }
                 LRESULT(0)
             }
+            0x8008 if app.options.metrics_file.is_some() => LRESULT(
+                app.link_at((l.0 as i16) as f32, ((l.0 >> 16) as i16) as f32)
+                    .is_some() as isize,
+            ),
             0x8006 => {
                 app.refresh_notes();
                 LRESULT(0)

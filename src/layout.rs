@@ -3,6 +3,7 @@ use gpui_pretext::{
     EngineProfile, PrepareOptions, PreparedTextWithSegments, TextMeasure, WhiteSpaceMode,
     layout_with_lines, prepare_with_segments,
 };
+use pulldown_cmark::Alignment;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct Font {
@@ -145,6 +146,8 @@ impl Prepared {
                 y: *y,
                 x,
                 width: line.width as f32,
+                layout_width: line.width as f32 + 3.0,
+                alignment: Alignment::None,
                 height,
                 runs,
                 origin: self.origin,
@@ -161,7 +164,10 @@ enum PreparedBlock {
         indent: usize,
         text: Box<Prepared>,
     },
-    Table(Vec<Vec<Prepared>>),
+    Table {
+        rows: Vec<Vec<Prepared>>,
+        alignments: Vec<Alignment>,
+    },
     Rule,
     Image {
         source: String,
@@ -176,6 +182,8 @@ pub struct Line {
     pub y: f32,
     pub x: f32,
     pub width: f32,
+    pub layout_width: f32,
+    pub alignment: Alignment,
     pub height: f32,
     pub runs: Vec<Run>,
     pub origin: usize,
@@ -259,7 +267,10 @@ impl Scene {
                                 .collect()
                         })
                         .collect();
-                    PreparedBlock::Table(rows)
+                    PreparedBlock::Table {
+                        rows,
+                        alignments: b.table.as_ref().unwrap().alignments.clone(),
+                    }
                 }
                 _ => PreparedBlock::Text {
                     kind: b.kind,
@@ -332,7 +343,7 @@ impl Scene {
                     });
                     y += height + 18.0;
                 }
-                PreparedBlock::Table(rows) => {
+                PreparedBlock::Table { rows, alignments } => {
                     let columns = rows.iter().map(Vec::len).max().unwrap_or(1).max(1);
                     let cell_width = width / columns as f32;
                     for (index, row) in rows.iter().enumerate() {
@@ -340,6 +351,7 @@ impl Scene {
                         let mut bottom = top + 32.0;
                         for (col, cell) in row.iter().enumerate() {
                             let mut cell_y = top + 8.0;
+                            let first_line = self.lines.len();
                             cell.wrap(
                                 (cell_width - 16.0).max(8.0),
                                 col as f32 * cell_width + 8.0,
@@ -347,6 +359,11 @@ impl Scene {
                                 Kind::Table,
                                 &mut self.lines,
                             );
+                            for line in &mut self.lines[first_line..] {
+                                line.alignment =
+                                    alignments.get(col).copied().unwrap_or(Alignment::None);
+                                line.layout_width = (cell_width - 16.0).max(1.0);
+                            }
                             bottom = bottom.max(cell_y + 8.0);
                         }
                         for col in 0..columns {
@@ -375,7 +392,7 @@ impl Scene {
         for block in &self.blocks {
             match block {
                 PreparedBlock::Text { text, .. } => texts.push(text.as_ref()),
-                PreparedBlock::Table(rows) => texts.extend(rows.iter().flatten()),
+                PreparedBlock::Table { rows, .. } => texts.extend(rows.iter().flatten()),
                 _ => {}
             }
         }
@@ -407,10 +424,20 @@ impl Scene {
         }
         hits
     }
+    // shortcut: prepared link bounds are coarse; use native glyph hit tests for exact styled clicks.
     pub fn link_at(&self, x: f32, y: f32) -> Option<&str> {
         self.lines
             .iter()
-            .find(|l| y >= l.y && y < l.y + l.height && x >= l.x && x <= l.x + l.width)
+            .find(|l| {
+                let gap = (l.layout_width - l.width).max(0.0);
+                let left = l.x
+                    + match l.alignment {
+                        Alignment::Center => gap / 2.0,
+                        Alignment::Right => gap,
+                        _ => 0.0,
+                    };
+                y >= l.y && y < l.y + l.height && x >= left && x <= left + l.width
+            })
             .and_then(|l| l.runs.iter().find_map(|r| r.style.link.as_deref()))
     }
 }
@@ -509,6 +536,67 @@ mod tests {
         assert_eq!(reading_zoom(f32::NAN), 1.0);
         assert_eq!(reading_zoom(9.0), 1.6);
         assert_eq!(reading_zoom(0.0), 0.8);
+    }
+    #[test]
+    fn table_alignment_survives_wrapping_zoom_and_search_without_remeasurement() {
+        let meter = Meter(Cell::new(0));
+        let doc = Document::parse(include_str!("../tests/fixtures/table-alignment.md"));
+        let tables: Vec<_> = doc.blocks.iter().filter_map(|b| b.table.as_ref()).collect();
+        assert_eq!(
+            tables[0].alignments,
+            [Alignment::Left, Alignment::Center, Alignment::Right]
+        );
+        assert_eq!(
+            tables[1].alignments,
+            [Alignment::None, Alignment::Center, Alignment::Right]
+        );
+        for zoom in [1.0, 1.4] {
+            let mut scene = Scene::with_zoom(&doc, &meter, zoom);
+            let calls = meter.0.get();
+            for width in [270.0, 550.0, 270.0] {
+                scene.reflow(width);
+                let inner = width / 3.0 - 16.0;
+                let second_top = scene.cells.iter().filter(|c| c.header).nth(3).unwrap().y;
+                for line in &scene.lines {
+                    if line.kind == Kind::Table {
+                        let col = (line.x / (width / 3.0)) as usize;
+                        let expected = if col == 0 {
+                            if line.y >= second_top {
+                                Alignment::None
+                            } else {
+                                Alignment::Left
+                            }
+                        } else if col == 1 {
+                            Alignment::Center
+                        } else {
+                            Alignment::Right
+                        };
+                        assert_eq!(line.alignment, expected);
+                        assert!((line.layout_width - inner).abs() < 0.01);
+                        assert!(line.x + line.layout_width <= width + 0.01);
+                    } else {
+                        assert_eq!(line.alignment, Alignment::None);
+                    }
+                }
+                assert_eq!(scene.find("After everything").len(), 1);
+                assert_eq!(scene.find("123.45").len(), 2);
+                let link = scene
+                    .lines
+                    .iter()
+                    .find(|l| {
+                        l.runs
+                            .iter()
+                            .any(|r| r.style.link.as_deref() == Some("https://example.com/center"))
+                    })
+                    .unwrap();
+                let center = link.x + link.layout_width / 2.0;
+                assert_eq!(
+                    scene.link_at(center, link.y + link.height / 2.0),
+                    Some("https://example.com/center")
+                );
+                assert_eq!(meter.0.get(), calls);
+            }
+        }
     }
     #[test]
     fn tables_are_real_cells_and_surrounding_content_survives() {

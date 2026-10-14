@@ -14,7 +14,10 @@ Pretext prepares each block/cell once using PreWrap. Styled wrapping reserves th
 largest measured advance among fonts used in that block; this is deliberately
 conservative. Arithmetic reflow creates line/run geometry and equal-width cell
 rows. Resize does not measure fonts. DirectWrite draws actual UTF-16 styled ranges;
-link activation uses native text hit-testing, and shell dispatch permits only
+table lines retain cell bounds and parsed alignment. DirectWrite applies alignment
+to the actual styled glyphs; the same layout supplies search marks and link hit tests
+in every column. The core coarse link lookup still uses cached prepared advances.
+Link activation uses native text hit-testing, and shell dispatch permits only
 HTTP/HTTPS/mailto without control bytes. No shell command strings are executed.
 
 WIC loads only canonical local paths inside the notes directory, bounded to
@@ -51,7 +54,7 @@ folder. Win32 unsafe code still requires review, not security-certification clai
 
 ## Future scope
 
-Exact styled advance mapping (rather than conservative reservations), aligned and
+Exact styled advance mapping (rather than conservative wrapping reservations),
 horizontally scrollable tables, syntax/math/diagrams/SVG, retained DirectComposition
 surfaces, system motion preferences, multi-instance/DPI/filesystem stress and signed
 installer/updater. These are not silently implied by the current desktop version.

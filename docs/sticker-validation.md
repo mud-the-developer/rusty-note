@@ -1,5 +1,33 @@
 # Simple read-only sticker checks
 
+## 0.3.6 table alignment
+
+Twenty-eight core tests passed. The mixed `table-alignment.md` fixture combines
+explicit/default column alignment, headings, styled/inline-code cells, safe links,
+empty cells, Korean/emoji, quotes/lists, code and surrounding content. Cached reflow
+at 270/550 widths and 100/140% preparation preserves alignment/search without extra
+font calls. A heading assertion uses semantic find because it legitimately wraps.
+
+Native owned-window checks inspect actual DirectWrite glyph offsets in 600x760 and
+360x500 windows in both themes, including wrapped headers/cells and styled numbers.
+Centered/right links are hit at their rendered glyphs and missed in empty padding
+through a diagnostics-only route shared with normal click handling. No external
+browser/mail process is launched. Numeric search marks follow the aligned layout;
+zoom and source-byte integrity pass. Normal/narrow table/link/number/bottom captures
+were inspected; quote/list/code/final paragraph alignment remained independent.
+
+Short 1.5-second idle samples reported 0ms CPU growth and no additional paints.
+Local working sets were about 45MiB, private bytes about 57–59MiB, not a memory
+budget or GPU measurement. Driver baselines are sampled after capture settles:
+PrintWindow itself paints. Alignment expectations use DirectWrite `width`, which
+excludes trailing whitespace, rather than `widthIncludingTrailingWhitespace`.
+Earlier driver assertion failures were corrected before counting final passes.
+
+Limits: equal-width columns remain. Many tiny columns or unbreakable words may
+clip; horizontal scrolling, live multi-monitor DPI and assistive technology remain
+unverified/not implemented. Search marks cover selected matching lines, not exact
+substring glyphs. Diagnostics emit numeric geometry/flags, not source text or URLs.
+
 ## 0.3.5 document find
 
 Twenty-seven core tests passed. Original semantic source IDs/ranges map literal

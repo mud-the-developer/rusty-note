@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.6 — aligned tables and precise table links
+
+- Apply existing Markdown left/center/right column metadata to headers and wrapped cells.
+- DirectWrite aligns actual styled glyphs inside cell bounds; resize stays font-cached.
+- Position search line marks from the drawn layout's metrics, including aligned numbers.
+- Fix link hit testing in later table columns: check both cell coordinates, not only
+  the first text line at a given vertical position. Keep the safe URI dispatch guard.
+- Mixed alignment fixture, cached reflow/zoom/search regression and native both-theme
+  glyph-position/link-hit/source-byte/idle checks at normal and narrow widths.
+
 ## 0.3.5 — read-only document find
 
 - Ctrl+F native find prompt, F3/Shift+F3 result navigation and Escape to clear.

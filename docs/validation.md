@@ -1,5 +1,9 @@
 # Rusty Note 0.3 validation
 
+This is the original integrated-editor baseline. Current read-only reader checks,
+including table alignment and column-aware native link hit testing, are recorded in
+[sticker validation](sticker-validation.md).
+
 ## Actual checks
 
 - Cargo fmt, Clippy with warnings denied, fifteen passing core regressions and MSVC Release build.

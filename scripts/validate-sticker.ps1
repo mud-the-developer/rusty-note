@@ -237,3 +237,74 @@ foreach($theme in @('dark','light')){
  finally{if(!$p.HasExited){$prompt=[StickerProbe]::Prompt($p.Id);if($prompt -ne [IntPtr]::Zero){$null=[StickerProbe]::PostMessageW($prompt,0x111,[IntPtr]2,[IntPtr]::Zero);Start-Sleep -Milliseconds 100};$null=[StickerProbe]::PostMessageW([StickerProbe]::Find($p.Id),0x10,[IntPtr]::Zero,[IntPtr]::Zero);if(!$p.WaitForExit(10000)){Stop-Process -Id $p.Id -Force;throw 'Owned find process did not close'}}}
 }
 Write-Output "Find validation passed. Artifacts: $findOut"
+function CheckTableGeometry($metrics){
+ if($metrics.table_cells -ne 27 -or @($metrics.table_geometry).Count -lt 25){throw 'Alignment fixture lost table cells/lines'}
+ $checked=0
+ foreach($line in $metrics.table_geometry){
+  if($line.ink_width -le 0 -or $line.ink_width -gt $line.box_width+0.1){continue}
+  $expected=if($line.alignment -eq 'Center'){($line.box_width-$line.ink_width)/2}elseif($line.alignment -eq 'Right'){$line.box_width-$line.ink_width}else{0}
+  if([math]::Abs($line.ink_left-$expected) -gt 0.75){throw ('Native glyph alignment wrong: '+($line|ConvertTo-Json -Compress))}
+  $checked++
+ }
+ if($checked -lt 10){throw 'Too few real DirectWrite lines checked'}
+}
+function CheckTableLinks([IntPtr]$hwnd,$metrics){
+ foreach($alignment in @('Center','Right')){
+  $line=@($metrics.table_geometry|Where-Object {$_.linked -and $_.alignment -eq $alignment -and $_.y -gt 106 -and $_.y+$_.height -lt $metrics.height_dip-46 -and $_.ink_width -le $_.box_width+0.1})|Select-Object -First 1
+  if(!$line){throw "No visible $alignment link for native hit testing"}
+  $x=[int]($line.x+$line.ink_left+$line.ink_width/2);$y=[int]($line.y+$line.height/2)
+  $hit=[StickerProbe]::SendMessageW($hwnd,0x8008,[IntPtr]::Zero,(PointParam $x $y))
+  if($hit.ToInt32() -ne 1){throw "$alignment table link did not hit its rendered glyphs"}
+  if($line.ink_left -gt 5){$miss=[StickerProbe]::SendMessageW($hwnd,0x8008,[IntPtr]::Zero,(PointParam ([int]($line.x+1)) $y));if($miss.ToInt32() -ne 0){throw 'Table padding incorrectly activated a link'}}
+ }
+}
+$tableOut=Join-Path $out 'alignment';New-Item -ItemType Directory -Force $tableOut|Out-Null
+$tableMd=Join-Path $tableOut 'Alignment.md';Copy-Item (Join-Path $root 'tests/fixtures/table-alignment.md') $tableMd
+$tableBefore=[IO.File]::ReadAllBytes($tableMd)
+foreach($theme in @('dark','light')){
+ $state=Join-Path $tableOut "$theme-state.json";$metrics=Join-Path $tableOut "$theme-metrics.json"
+ $argv=@(('"'+$tableMd+'"'),'--state-file',('"'+$state+'"'),'--metrics-file',('"'+$metrics+'"'))
+ if($theme -eq 'light'){$argv+='--light'}
+ $p=Start-Process -FilePath $exe -ArgumentList $argv -PassThru
+ try{
+  if(!$p.WaitForInputIdle(15000)){throw 'Alignment app not ready'};$hwnd=[StickerProbe]::Find($p.Id);if($hwnd -eq [IntPtr]::Zero){throw 'Owned alignment HWND missing'};Start-Sleep -Milliseconds 350
+  foreach($width in @(600,360)){
+   $height=if($width -eq 600){760}else{500}
+   $null=[StickerProbe]::SetWindowPos($hwnd,[IntPtr]::Zero,0,0,$width,$height,0x16)
+   $null=[StickerProbe]::SendMessageW($hwnd,0x100,[IntPtr]0x24,[IntPtr]::Zero)
+   $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$first=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+   CheckTableGeometry $first
+   Capture $hwnd (Join-Path $tableOut "$theme-$width-top.png")
+   FindQuery $p $hwnd 'center link'
+   $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$links=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+   CheckTableGeometry $links;CheckTableLinks $hwnd $links
+   if($links.find_count -ne 1 -or $links.font_measurements -ne $first.font_measurements){throw 'Find/links remeasured aligned-table fonts or lost a match'}
+   Capture $hwnd (Join-Path $tableOut "$theme-$width-links.png")
+   $null=[StickerProbe]::SendMessageW($hwnd,0x100,[IntPtr]0x1b,[IntPtr]::Zero)
+   FindQuery $p $hwnd '123.45'
+   $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$number=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+   if($number.find_count -ne 2){throw 'Right-aligned number/final surrounding text not searchable'}
+   Capture $hwnd (Join-Path $tableOut "$theme-$width-number.png")
+   $null=[StickerProbe]::SendMessageW($hwnd,0x100,[IntPtr]0x1b,[IntPtr]::Zero)
+   $null=[StickerProbe]::SendMessageW($hwnd,0x100,[IntPtr]0x23,[IntPtr]::Zero)
+   Capture $hwnd (Join-Path $tableOut "$theme-$width-bottom.png")
+   $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$after=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+   if($after.font_measurements -ne $first.font_measurements){throw 'Aligned table interaction remeasured fonts'}
+   if($width -eq 600){$wideFontCalls=$first.font_measurements}elseif($first.font_measurements -ne $wideFontCalls){throw 'Aligned table resize remeasured fonts'}
+  }
+  $null=[StickerProbe]::SendMessageW($hwnd,0x111,[IntPtr]211,[IntPtr]::Zero)
+  FindQuery $p $hwnd 'center link'
+  $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$zoom=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+  CheckTableGeometry $zoom;CheckTableLinks $hwnd $zoom
+  Capture $hwnd (Join-Path $tableOut "$theme-zoom-links.png")
+  Start-Sleep -Milliseconds 250
+  $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$quiet=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+  $p.Refresh();$cpu=$p.TotalProcessorTime.TotalMilliseconds;Start-Sleep -Milliseconds 1500;$p.Refresh();$delta=$p.TotalProcessorTime.TotalMilliseconds-$cpu
+  $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$idle=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+  if($idle.paint_count -ne $quiet.paint_count -or $delta -gt 100){throw 'Aligned table idle activity exceeded local check'}
+  $p.Refresh();Write-Output "$theme native alignment/link checks passed; idle CPU $delta ms, working set $($p.WorkingSet64), private bytes $($p.PrivateMemorySize64)"
+  if([Convert]::ToBase64String([IO.File]::ReadAllBytes($tableMd)) -ne [Convert]::ToBase64String($tableBefore)){throw 'Table reading changed Markdown source'}
+ }catch{Write-Output ('Alignment validation failure: '+$_.Exception.Message);throw}
+ finally{if(!$p.HasExited){$prompt=[StickerProbe]::Prompt($p.Id);if($prompt -ne [IntPtr]::Zero){$null=[StickerProbe]::PostMessageW($prompt,0x111,[IntPtr]2,[IntPtr]::Zero);Start-Sleep -Milliseconds 100};$null=[StickerProbe]::PostMessageW([StickerProbe]::Find($p.Id),0x10,[IntPtr]::Zero,[IntPtr]::Zero);if(!$p.WaitForExit(10000)){Stop-Process -Id $p.Id -Force;throw 'Owned alignment process did not close'}}}
+}
+Write-Output "Alignment validation passed. Artifacts: $tableOut"

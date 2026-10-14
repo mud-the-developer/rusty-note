@@ -52,7 +52,9 @@ The old editor remains opt-in with `--editor`; it is not part of the default sti
 
 - Headings, paragraphs, bold/italic/strike, inline code, safe clickable web/mail links.
 - Ordered/bullet/nested/task lists, quotes, horizontal rules and whitespace-preserving code.
-- Real wrapping table cells with header shading and grid borders.
+- Real wrapping table cells with header shading, grid borders and Markdown column alignment.
+  `:---` is left, `:---:` centered and `---:` right; headers and each wrapped line follow it.
+  Styled text, search marks and link hit testing use the same native cell layout.
 - Local PNG/JPEG/etc images through Windows WIC, with bounded file/pixel/cache limits.
 - Native Unicode Markdown source editor: selection, undo, clipboard and Windows IME.
 - New notes, explicit Save, read view, rename, and recoverable local note trash.
@@ -142,8 +144,9 @@ in each block, then draws exact DirectWrite style ranges. Reflow does not measur
   each image is limited to 8 MiB / 4 million pixels, with at most eight cached images.
 - SVG, math/Mermaid, syntax highlighting, rich-text/WYSIWYG editing and full Tinta parity
   are not supported. Raw HTML is displayed as literal text, never executed.
-- Tables use equal-width columns; alignment metadata is parsed but not applied.
-  Very many columns in tiny windows need horizontal scrolling in a future version.
+- Tables use equal-width columns with left/center/right alignment.
+  Very many columns or unbreakable text in tiny cells may be clipped; horizontal
+  scrolling is not implemented.
 - Desktop file-change checks are not exclusive filesystem transactions. Multi-instance,
   exotic filesystem, long-document and live multi-monitor DPI behavior need more coverage.
 
