@@ -39,6 +39,8 @@ public static class StickerProbe {
  [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr h,Callback cb,IntPtr p);
  public static IntPtr DialogButton(IntPtr dialog){IntPtr found=IntPtr.Zero;int matches=0;EnumChildWindows(dialog,(h,p)=>{var s=new StringBuilder(64);GetClassNameW(h,s,64);if(s.ToString().Equals("Button",StringComparison.OrdinalIgnoreCase)){found=h;matches++;}return true;},IntPtr.Zero);return matches==1?found:IntPtr.Zero;}
  public static IntPtr Dialog(int pid){IntPtr found=IntPtr.Zero;int matches=0;EnumWindows((h,p)=>{uint owner;GetWindowThreadProcessId(h,out owner);if(owner!=(uint)pid)return true;var s=new StringBuilder(128);GetClassNameW(h,s,128);if(s.ToString()=="#32770"){found=h;matches++;}return true;},IntPtr.Zero);return matches==1?found:IntPtr.Zero;}
+ [DllImport("user32.dll",EntryPoint="SendMessageW",CharSet=CharSet.Unicode)] public static extern IntPtr SetText(IntPtr h,uint m,IntPtr w,string text);
+ public static IntPtr Prompt(int pid){IntPtr found=IntPtr.Zero;int matches=0;EnumWindows((h,p)=>{uint owner;GetWindowThreadProcessId(h,out owner);if(owner!=(uint)pid)return true;var s=new StringBuilder(128);GetClassNameW(h,s,128);if(s.ToString()=="RustyNote.Prompt"){found=h;matches++;}return true;},IntPtr.Zero);return matches==1?found:IntPtr.Zero;}
  public static IntPtr Find(int pid){IntPtr found=IntPtr.Zero;EnumWindows((h,p)=>{uint owner;GetWindowThreadProcessId(h,out owner);if(owner!=(uint)pid)return true;var s=new StringBuilder(128);GetClassNameW(h,s,128);if(s.ToString()!="RustyNote.Native")return true;found=h;return false;},IntPtr.Zero);return found;}
 }
 '@
@@ -179,3 +181,59 @@ foreach($theme in @('dark','light')){
  finally{if(!$p.HasExited){$modal=[StickerProbe]::Dialog($p.Id);if($modal -ne [IntPtr]::Zero){$null=[StickerProbe]::PostMessageW($modal,0x10,[IntPtr]::Zero,[IntPtr]::Zero);Start-Sleep -Milliseconds 150};$null=[StickerProbe]::PostMessageW([StickerProbe]::Find($p.Id),0x10,[IntPtr]::Zero,[IntPtr]::Zero);if(!$p.WaitForExit(10000)){Stop-Process -Id $p.Id -Force;throw 'Owned test-process did not close cleanly'}}}
 }
 Write-Output "Sticker validation passed. Artifacts: $out"
+function FindQuery($process,[IntPtr]$hwnd,[string]$query){$null=[StickerProbe]::PostMessageW($hwnd,0x111,[IntPtr]215,[IntPtr]::Zero);Start-Sleep -Milliseconds 180;$prompt=[StickerProbe]::Prompt($process.Id);if($prompt -eq [IntPtr]::Zero){throw 'Owned find prompt missing'};$edit=[StickerProbe]::GetDlgItem($prompt,10);$null=[StickerProbe]::SetText($edit,0x0c,[IntPtr]::Zero,$query);$null=[StickerProbe]::PostMessageW($prompt,0x111,[IntPtr]1,[IntPtr]::Zero);Start-Sleep -Milliseconds 180}
+$findOut=Join-Path $out 'find';New-Item -ItemType Directory -Force $findOut | Out-Null
+$findMd=Join-Path $findOut 'Find.md';Copy-Item (Join-Path $root 'tests/fixtures/reader-find.md') $findMd
+$findBefore=[IO.File]::ReadAllBytes($findMd)
+foreach($theme in @('dark','light')){
+ $state=Join-Path $findOut "$theme-state.json";$metrics=Join-Path $findOut "$theme-metrics.json"
+ $argv=@(('"'+$findMd+'"'),'--state-file',('"'+$state+'"'),'--metrics-file',('"'+$metrics+'"'))
+ if($theme -eq 'light'){$argv+='--light'}
+ $p=Start-Process -FilePath $exe -ArgumentList $argv -PassThru
+ try{
+  if(!$p.WaitForInputIdle(15000)){throw 'Find app not ready'};$hwnd=[StickerProbe]::Find($p.Id);Start-Sleep -Milliseconds 350
+  $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$baseline=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+  FindQuery $p $hwnd 'needle phrase'
+  $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$found=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+  if($found.find_count -ne 3 -or $found.find_index -ne 0 -or $found.font_measurements -ne $baseline.font_measurements){throw 'Find did not return semantic results without font measurement'}
+  Capture $hwnd (Join-Path $findOut "$theme-first.png")
+  $null=[StickerProbe]::SendMessageW($hwnd,0x100,[IntPtr]0x72,[IntPtr]::Zero)
+  $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$next=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+  if($next.find_index -ne 1 -or $next.scroll -le $found.scroll){throw 'F3 did not advance/jump to table result'}
+  Capture $hwnd (Join-Path $findOut "$theme-table.png")
+  $null=[StickerProbe]::SendMessageW($hwnd,0x111,[IntPtr]217,[IntPtr]::Zero)
+  $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$prev=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+  if($prev.find_index -ne 0){throw 'Previous result did not return'}
+  $null=[StickerProbe]::SendMessageW($hwnd,0x111,[IntPtr]217,[IntPtr]::Zero)
+  $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$wrap=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+  if($wrap.find_index -ne 2){throw 'Previous result did not wrap'}
+  Capture $hwnd (Join-Path $findOut "$theme-code.png")
+  $null=[StickerProbe]::SetWindowPos($hwnd,[IntPtr]::Zero,0,0,600,760,0x16)
+  $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$wide=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+  if($wide.find_count -ne 3 -or $wide.find_index -ne 2 -or $wide.font_measurements -ne $baseline.font_measurements){throw 'Resize lost search results or measured fonts'}
+  Capture $hwnd (Join-Path $findOut "$theme-wide.png")
+  $null=[StickerProbe]::SendMessageW($hwnd,0x111,[IntPtr]211,[IntPtr]::Zero)
+  $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$zoom=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+  if($zoom.find_count -ne 3){throw 'Text-size change lost query results'}
+  [IO.File]::WriteAllBytes($findMd,[Text.Encoding]::UTF8.GetBytes([Text.Encoding]::UTF8.GetString($findBefore)+"`n`nA fourth needle phrase after refresh."));Start-Sleep -Milliseconds 350
+  $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$refresh=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+  if($refresh.find_count -ne 4){throw 'External refresh did not update query results'}
+  [IO.File]::WriteAllBytes($findMd,$findBefore);Start-Sleep -Milliseconds 350
+  FindQuery $p $hwnd 'not-found-123'
+  $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$none=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+  if($none.find_count -ne 0 -or !$none.find_active -or $none.error){throw 'No-results query was not handled normally'}
+  Capture $hwnd (Join-Path $findOut "$theme-no-results.png")
+  $korean=([string][char]0xD55C)+([string][char]0xAD6D)+([string][char]0xC5B4)+' '+([string][char]0xCC3E)+([string][char]0xAE30)
+  FindQuery $p $hwnd $korean
+  $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$unicode=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+  if($unicode.find_count -ne 2){throw 'Unicode literal query missing results'}
+  Capture $hwnd (Join-Path $findOut "$theme-unicode.png")
+  $null=[StickerProbe]::SendMessageW($hwnd,0x100,[IntPtr]0x1b,[IntPtr]::Zero)
+  $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$clear=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+  if($clear.find_active -or $clear.find_count -ne 0){throw 'Escape did not clear find'}
+  if([Convert]::ToBase64String([IO.File]::ReadAllBytes($findMd)) -ne [Convert]::ToBase64String($findBefore)){throw 'Find changed Markdown source'}
+  Write-Output "$theme native find checks passed"
+ }catch{Write-Output ("Find validation failure: "+$_.Exception.Message);throw}
+ finally{if(!$p.HasExited){$prompt=[StickerProbe]::Prompt($p.Id);if($prompt -ne [IntPtr]::Zero){$null=[StickerProbe]::PostMessageW($prompt,0x111,[IntPtr]2,[IntPtr]::Zero);Start-Sleep -Milliseconds 100};$null=[StickerProbe]::PostMessageW([StickerProbe]::Find($p.Id),0x10,[IntPtr]::Zero,[IntPtr]::Zero);if(!$p.WaitForExit(10000)){Stop-Process -Id $p.Id -Force;throw 'Owned find process did not close'}}}
+}
+Write-Output "Find validation passed. Artifacts: $findOut"

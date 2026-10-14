@@ -175,6 +175,9 @@ struct App {
     library_scroll: usize,
     tray_available: bool,
     viewer_source: Option<String>,
+    search_query: String,
+    search_hits: Vec<crate::layout::SearchHit>,
+    search_index: usize,
 }
 impl App {
     unsafe fn new(mut options: Options) -> Result<Self> {
@@ -279,6 +282,9 @@ impl App {
                 library_scroll: 0,
                 tray_available: false,
                 viewer_source,
+                search_query: String::new(),
+                search_hits: Vec::new(),
+                search_index: 0,
                 error,
             })
         }
@@ -354,8 +360,15 @@ impl App {
         if self.library { 178.0 } else { 28.0 }
     }
     fn reflow(&mut self) {
+        let passes = self.scene.layout_passes;
         self.scene
             .reflow((self.width - self.content_x() - 28.0).max(48.0));
+        if self.scene.layout_passes != passes {
+            self.search_hits = self.scene.find(&self.search_query);
+            self.search_index = self
+                .search_index
+                .min(self.search_hits.len().saturating_sub(1));
+        }
         self.scroll =
             crate::viewer::reload_scroll(self.scroll, self.scene.height, self.height - 160.0);
     }
@@ -838,7 +851,7 @@ impl App {
                     progress,
                 )?;
             }
-            for line in &self.scene.lines {
+            for (line_index, line) in self.scene.lines.iter().enumerate() {
                 let y = top + line.y - self.scroll;
                 if y + line.height < 106.0 || y > self.height - 46.0 {
                     continue;
@@ -865,6 +878,23 @@ impl App {
                         0.65 * progress,
                     );
                 }
+                if self
+                    .search_hits
+                    .get(self.search_index)
+                    .is_some_and(|hit| hit.lines.contains(&line_index))
+                {
+                    self.fill(
+                        rect(
+                            content_x + inset - 2.0,
+                            y,
+                            (line.width + 4.0).min(self.width - content_x - inset - 26.0),
+                            line.height,
+                        ),
+                        3.0,
+                        palette.accent,
+                        0.2,
+                    );
+                }
                 let rgb = match line.kind {
                     Kind::Heading(_) => palette.ink,
                     Kind::Code => palette.accent,
@@ -885,9 +915,25 @@ impl App {
                 "READ ONLY  ·  {}%  ·  Ctrl+wheel zoom",
                 (self.state.zoom * 100.0).round() as u32
             );
+            let find_status = if self.search_hits.is_empty() {
+                "Find: no results  ·  Ctrl+F change  ·  Esc clear".to_owned()
+            } else {
+                format!(
+                    "Find {}/{}{}  ·  F3 next  ·  Shift+F3 back",
+                    self.search_index + 1,
+                    self.search_hits.len(),
+                    if self.search_hits.len() == 4096 {
+                        " (limit)"
+                    } else {
+                        ""
+                    }
+                )
+            };
             self.text(
                 if self.error.is_some() {
                     "Read error  ·  click for details  ·  F5 retry"
+                } else if !self.search_query.is_empty() {
+                    &find_status
                 } else if !self.options.editor_mode && self.hover_region(self.hover) == -1 {
                     &size_hint
                 } else {
@@ -947,6 +993,9 @@ impl App {
                         }
                     }
                     return;
+                }
+                if !same_file {
+                    self.search_index = 0;
                 }
                 self.viewer_source = Some(text.clone());
                 self.options.notes_dir = note.path.parent().unwrap().to_owned();
@@ -1018,6 +1067,63 @@ impl App {
             }
         }
     }
+    fn focus_search_hit(&mut self) {
+        if let Some(hit) = self.search_hits.get(self.search_index)
+            && let Some(line) = hit
+                .lines
+                .first()
+                .and_then(|index| self.scene.lines.get(*index))
+        {
+            self.scroll =
+                crate::viewer::reload_scroll(line.y - 16.0, self.scene.height, self.height - 160.0);
+        }
+        unsafe {
+            let _ = InvalidateRect(Some(self.hwnd), None, false);
+        }
+    }
+    fn begin_find(&mut self) {
+        if self.options.editor_mode {
+            return;
+        }
+        if let Some(query) = crate::prompt::ask(self.hwnd, "Find in Markdown", &self.search_query) {
+            let query = query.trim();
+            if query.len() > 512 {
+                unsafe {
+                    MessageBoxW(
+                        Some(self.hwnd),
+                        w!("Find text must be at most 512 UTF-8 bytes."),
+                        w!("Find in Markdown"),
+                        MB_OK | MB_ICONINFORMATION,
+                    );
+                }
+                return;
+            }
+            self.search_query = query.into();
+            self.search_index = 0;
+            self.search_hits = self.scene.find(&self.search_query);
+            self.focus_search_hit();
+        }
+    }
+    fn step_find(&mut self, back: bool) {
+        if self.search_hits.is_empty() {
+            return;
+        }
+        let count = self.search_hits.len();
+        self.search_index = if back {
+            (self.search_index + count - 1) % count
+        } else {
+            (self.search_index + 1) % count
+        };
+        self.focus_search_hit();
+    }
+    fn clear_find(&mut self) {
+        self.search_query.clear();
+        self.search_hits.clear();
+        self.search_index = 0;
+        unsafe {
+            let _ = InvalidateRect(Some(self.hwnd), None, false);
+        }
+    }
     fn choose_markdown(&mut self) {
         if let Some(path) = crate::desktop::choose_markdown(self.hwnd) {
             self.open_markdown(path, true);
@@ -1041,6 +1147,10 @@ impl App {
                     (212, "Smaller text\tCtrl+-"),
                     (213, "Reset text size\tCtrl+0"),
                     (214, "Error details"),
+                    (215, "Find in Markdown\tCtrl+F"),
+                    (216, "Next result\tF3"),
+                    (217, "Previous result\tShift+F3"),
+                    (218, "Clear find\tEsc"),
                     (207, "Quit"),
                 ] {
                     if self.options.editor_mode && id >= 211 {
@@ -1050,7 +1160,8 @@ impl App {
                         continue;
                     }
                     if !self.options.editor_mode
-                        && ![204, 205, 206, 207, 211, 212, 213, 214].contains(&id)
+                        && ![204, 205, 206, 207, 211, 212, 213, 214, 215, 216, 217, 218]
+                            .contains(&id)
                     {
                         continue;
                     }
@@ -1328,7 +1439,7 @@ impl App {
             "font_measurements":self.fonts.measurements.get(),"prepare_blocks":self.scene.prepare_passes,
             "layout_passes":self.scene.layout_passes,"paint_count":self.paints,"animation_active":self.motion.active(),
             "lines":self.scene.lines.len(),"width_dip":self.width,"height_dip":self.height,
-            "selected":self.notes.get(self.selected).map(|n| &n.title),"read_only":!self.options.editor_mode,"scroll":self.scroll,"pinned":self.state.pinned,"light":self.state.light,"hint":self.reading_hint(),"scroll_thumb_top":crate::viewer::Scrollbar::new(self.scene.height,self.height).map(|bar|bar.thumb_top(self.scroll)),"scroll_thumb_size":crate::viewer::Scrollbar::new(self.scene.height,self.height).map(|bar|bar.thumb),"scale":self.scale,"zoom":self.state.zoom,"error":self.error,"table_cells":self.scene.cells.len(),"images":self.scene.images.len(),"styled_runs":self.scene.lines.iter().map(|l|l.runs.iter().filter(|r|r.style.bold||r.style.italic||r.style.code||r.style.link.is_some()||r.style.strike).count()).sum::<usize>()})
+            "selected":self.notes.get(self.selected).map(|n| &n.title),"read_only":!self.options.editor_mode,"scroll":self.scroll,"pinned":self.state.pinned,"light":self.state.light,"hint":self.reading_hint(),"scroll_thumb_top":crate::viewer::Scrollbar::new(self.scene.height,self.height).map(|bar|bar.thumb_top(self.scroll)),"scroll_thumb_size":crate::viewer::Scrollbar::new(self.scene.height,self.height).map(|bar|bar.thumb),"scale":self.scale,"zoom":self.state.zoom,"find_count":self.search_hits.len(),"find_index":self.search_index,"find_active":!self.search_query.is_empty(),"error":self.error,"table_cells":self.scene.cells.len(),"images":self.scene.images.len(),"styled_runs":self.scene.lines.iter().map(|l|l.runs.iter().filter(|r|r.style.bold||r.style.italic||r.style.code||r.style.link.is_some()||r.style.strike).count()).sum::<usize>()})
     }
 }
 
@@ -1586,6 +1697,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
             WM_KEYDOWN => {
                 match w.0 as u16 {
                     0x1b => {
+                        if !app.options.editor_mode {
+                            app.clear_find();
+                            return LRESULT(0);
+                        }
                         app.library = false;
                         app.reflow();
                         app.animate();
@@ -1594,6 +1709,9 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                         app.library = !app.library;
                         app.reflow();
                         app.animate();
+                    }
+                    0x72 if !app.options.editor_mode => {
+                        app.step_find(GetKeyState(0x10) < 0);
                     }
                     0x71 => {
                         let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(208), LPARAM(0));
@@ -1717,6 +1835,14 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                     app.change_zoom(1.0);
                 } else if command == 214 {
                     app.show_error();
+                } else if command == 215 {
+                    app.begin_find();
+                } else if command == 216 {
+                    app.step_find(false);
+                } else if command == 217 {
+                    app.step_find(true);
+                } else if command == 218 {
+                    app.clear_find();
                 } else if command == 205 && !app.options.editor_mode {
                     app.choose_markdown();
                 } else if command == 204 {
@@ -1982,6 +2108,7 @@ pub fn run(options: Options) -> Result<()> {
             }
             if message.message == WM_KEYDOWN && GetKeyState(0x11) < 0 {
                 let command = match message.wParam.0 {
+                    0x46 => Some(215),
                     0x45 => Some(200),
                     0x53 => Some(201),
                     0x4e => Some(202),

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.5 — read-only document find
+
+- Ctrl+F native find prompt, F3/Shift+F3 result navigation and Escape to clear.
+- Count/status and selected matching-line marks across paragraphs, table cells and code.
+- Match semantic text rather than raw Markdown syntax; phrases survive visual wrapping.
+- Preserve/update results across resize, text-size changes and external refresh.
+- Bounded literal matching with ASCII-insensitive case and unchanged source bytes;
+  search performs no font preparation or app-state query persistence.
+- Mixed reader-find fixture, wrapping/Unicode/limit regressions and native both-theme
+  prompt/navigation/no-result/reflow/refresh checks.
+
 ## 0.3.4 — text size and recoverable read errors
 
 - Bounded 80–160% reading text size with Ctrl++/Ctrl+-/Ctrl+0, Ctrl+wheel and menu controls.

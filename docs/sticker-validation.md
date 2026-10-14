@@ -1,5 +1,27 @@
 # Simple read-only sticker checks
 
+## 0.3.5 document find
+
+Twenty-seven core tests passed. Original semantic source IDs/ranges map literal
+matches onto wrapped lines, including table cells and code. Queries are capped at
+512 UTF-8 bytes and 4096 displayed hits; tests cover empty/overlong/no-result input,
+English case, Korean literals, wrapping and unchanged font-call counts.
+
+The native owned-window harness opens the Ctrl+F prompt through its menu-command
+route, sets the native Unicode EDIT and confirms it. Both themes check 3 matches,
+F3 and previous/wrapped navigation, resize without measuring fonts, zoom, a controlled
+external fixture append adding a fourth match, no results, 2 Korean matches and Esc
+clear. Copied source bytes are unchanged afterward. Normal/narrow captures of the
+paragraph/table/code/Unicode/no-result views were inspected. Query strings are not
+written to app state or diagnostic metrics; only counts/index/active flags are.
+
+Limitations: selected matching **lines**, not exact substring glyphs, are marked.
+Non-ASCII case folding, regex, image-alt and cross-block phrase matching are not
+implemented. The initial absent-word assertion was corrected because the fixture
+literally contained that word; final tests use a genuinely absent query.
+Native Ctrl dispatch/Shift key state is reviewed; the prompt/menu and direct F3 route
+are automated without global keyboard injection. Existing DPI/accessibility gaps remain.
+
 ## 0.3.4 text comfort and errors
 
 Twenty-five core tests passed. Scaled Scene fonts and mixed tables/code are checked

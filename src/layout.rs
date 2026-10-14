@@ -71,9 +71,10 @@ struct Prepared {
     source: String,
     runs: Vec<Run>,
     font: Font,
+    origin: usize,
 }
 impl Prepared {
-    fn new(text: &str, runs: &[Run], font: Font, meter: &dyn FontMeasure) -> Self {
+    fn new(text: &str, runs: &[Run], font: Font, meter: &dyn FontMeasure, origin: usize) -> Self {
         let mut fonts = vec![font];
         for run in runs {
             let mut f = font;
@@ -98,6 +99,7 @@ impl Prepared {
             source: text.into(),
             runs: runs.to_vec(),
             font,
+            origin,
         }
     }
     fn wrap(&self, width: f32, x: f32, y: &mut f32, kind: Kind, lines: &mut Vec<Line>) {
@@ -145,6 +147,9 @@ impl Prepared {
                 width: line.width as f32,
                 height,
                 runs,
+                origin: self.origin,
+                source_start: start,
+                source_end: end,
             });
             *y += height;
         }
@@ -173,6 +178,13 @@ pub struct Line {
     pub width: f32,
     pub height: f32,
     pub runs: Vec<Run>,
+    pub origin: usize,
+    pub source_start: usize,
+    pub source_end: usize,
+}
+#[derive(Clone, Debug)]
+pub struct SearchHit {
+    pub lines: Vec<usize>,
 }
 #[derive(Clone, Debug)]
 pub struct CellBox {
@@ -206,6 +218,12 @@ impl Scene {
         Self::with_zoom(doc, meter, 1.0)
     }
     pub fn with_zoom(doc: &Document, meter: &dyn FontMeasure, zoom: f32) -> Self {
+        let mut origin = 0;
+        let mut prepare = |text: &str, runs: &[Run], font: Font| {
+            let id = origin;
+            origin += 1;
+            Prepared::new(text, runs, font, meter, id)
+        };
         let blocks = doc
             .blocks
             .iter()
@@ -229,14 +247,13 @@ impl Scene {
                         .map(|(index, row)| {
                             row.iter()
                                 .map(|cell| {
-                                    Prepared::new(
+                                    prepare(
                                         &cell.text,
                                         &cell.runs,
                                         Font {
                                             bold: index == 0,
                                             ..Font::for_kind(Kind::Table).zoomed(zoom)
                                         },
-                                        meter,
                                     )
                                 })
                                 .collect()
@@ -247,11 +264,10 @@ impl Scene {
                 _ => PreparedBlock::Text {
                     kind: b.kind,
                     indent: b.indent,
-                    text: Box::new(Prepared::new(
+                    text: Box::new(prepare(
                         &b.text,
                         &b.runs,
                         Font::for_kind(b.kind).zoomed(zoom),
-                        meter,
                     )),
                 },
             })
@@ -350,6 +366,47 @@ impl Scene {
         }
         self.height = y;
     }
+    pub fn find(&self, query: &str) -> Vec<SearchHit> {
+        let query = query.trim().to_ascii_lowercase();
+        if query.is_empty() || query.len() > 512 {
+            return Vec::new();
+        }
+        let mut texts = Vec::new();
+        for block in &self.blocks {
+            match block {
+                PreparedBlock::Text { text, .. } => texts.push(text.as_ref()),
+                PreparedBlock::Table(rows) => texts.extend(rows.iter().flatten()),
+                _ => {}
+            }
+        }
+        let mut by_source = vec![Vec::new(); texts.len()];
+        for (index, line) in self.lines.iter().enumerate() {
+            by_source[line.origin].push(index);
+        }
+        let mut hits = Vec::new();
+        for text in texts {
+            // shortcut: ASCII-insensitive case; use Unicode folding if non-ASCII case matching is required.
+            let source = text.source.to_ascii_lowercase();
+            for (start, _) in source.match_indices(&query) {
+                let end = start + query.len();
+                let candidates = &by_source[text.origin];
+                let first =
+                    candidates.partition_point(|index| self.lines[*index].source_end <= start);
+                let lines = candidates[first..]
+                    .iter()
+                    .take_while(|index| self.lines[**index].source_start < end)
+                    .copied()
+                    .collect::<Vec<_>>();
+                if !lines.is_empty() {
+                    hits.push(SearchHit { lines });
+                    if hits.len() == 4096 {
+                        return hits;
+                    }
+                }
+            }
+        }
+        hits
+    }
     pub fn link_at(&self, x: f32, y: f32) -> Option<&str> {
         self.lines
             .iter()
@@ -389,6 +446,36 @@ mod tests {
         let passes = scene.layout_passes;
         scene.reflow(360.0);
         assert_eq!(passes, scene.layout_passes);
+    }
+    #[test]
+    fn find_uses_semantic_text_and_matches_phrases_across_wrapped_lines() {
+        let meter = Meter(Cell::new(0));
+        let doc = Document::parse(include_str!("../tests/fixtures/reader-find.md"));
+        let mut scene = Scene::new(&doc, &meter);
+        scene.reflow(150.0);
+        let calls = meter.0.get();
+        let hits = scene.find("needle phrase");
+        assert_eq!(hits.len(), 3);
+        assert!(hits[0].lines.len() > 1);
+        assert_eq!(scene.find("NEEDLE PHRASE").len(), 3);
+        assert_eq!(scene.find("한국어 찾기").len(), 2);
+        assert!(scene.find("not-found-123").is_empty());
+        assert!(scene.find("").is_empty());
+        assert_eq!(meter.0.get(), calls);
+        scene.reflow(550.0);
+        assert_eq!(scene.find("needle phrase").len(), 3);
+        assert_eq!(meter.0.get(), calls);
+    }
+    #[test]
+    fn find_caps_results_and_rejects_overlong_input_without_measuring_fonts() {
+        let meter = Meter(Cell::new(0));
+        let doc = Document::parse(&"needle ".repeat(4200));
+        let mut scene = Scene::new(&doc, &meter);
+        scene.reflow(300.0);
+        let calls = meter.0.get();
+        assert_eq!(scene.find("needle").len(), 4096);
+        assert!(scene.find(&"n".repeat(513)).is_empty());
+        assert_eq!(meter.0.get(), calls);
     }
     #[test]
     fn reading_zoom_uses_scaled_fonts_and_keeps_resize_cached() {

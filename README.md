@@ -34,6 +34,14 @@ If reading fails, click the colored error status (or Error details in the menu) 
 the full path/message. Restore the file and press **F5**; the last read view is kept.
 Changing text size keeps an approximate reading area, not an exact paragraph anchor.
 
+**Ctrl+F** finds text in the rendered Markdown; **F3 / Shift+F3** move through results
+and **Esc** clears the line marks. Matching works across visual wrapping within a
+paragraph or table cell, including code. Resize, zoom and external refresh update
+result geometry without extra search-time font measurement. English letter case is
+ignored; other Unicode text matches literally. Queries are bounded to 512 UTF-8
+bytes / 4096 displayed results; no regex, image-alt or cross-block phrase matching.
+Queries are not saved to app state.
+
 External changes refresh the document without losing your reading position. Unrelated
 folder changes do not remeasure fonts. Old/off-screen placement is recovered into the
 nearest monitor work area. [REA reference review and coverage](docs/reference-review.md).
