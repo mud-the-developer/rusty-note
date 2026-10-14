@@ -9,7 +9,7 @@ Copy-Item (Join-Path $root 'tests/fixtures/sticky-viewer.md') $md
 $before=[IO.File]::ReadAllBytes($md)
 $dropName=([string][char]0xD55C)+([string][char]0xAE00)+' '+([string][char]0xB4DC)+([string][char]0xB86D)
 $dropMd=Join-Path $out ($dropName+'.md')
-Copy-Item (Join-Path $root 'tests/fixtures/reader-controls.md') $dropMd
+Copy-Item (Join-Path $root 'tests/fixtures/reader-comfort.md') $dropMd
 $dropBefore=[IO.File]::ReadAllBytes($dropMd)
 Add-Type -AssemblyName System.Drawing
 Add-Type @'
@@ -36,6 +36,9 @@ public static class StickerProbe {
  [StructLayout(LayoutKind.Sequential)] struct MONITORINFO{public uint Size;public RECT Monitor,Work;public uint Flags;}
  [DllImport("user32.dll")] static extern bool GetMonitorInfoW(IntPtr h,ref MONITORINFO info);
  public static bool IsVisiblePlacement(IntPtr h){RECT r;GetWindowRect(h,out r);var info=new MONITORINFO{Size=(uint)Marshal.SizeOf(typeof(MONITORINFO))};return GetMonitorInfoW(MonitorFromWindow(h,2),ref info)&&r.L>=info.Work.L&&r.T>=info.Work.T&&r.R<=info.Work.R&&r.B<=info.Work.B;}
+ [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr h,Callback cb,IntPtr p);
+ public static IntPtr DialogButton(IntPtr dialog){IntPtr found=IntPtr.Zero;int matches=0;EnumChildWindows(dialog,(h,p)=>{var s=new StringBuilder(64);GetClassNameW(h,s,64);if(s.ToString().Equals("Button",StringComparison.OrdinalIgnoreCase)){found=h;matches++;}return true;},IntPtr.Zero);return matches==1?found:IntPtr.Zero;}
+ public static IntPtr Dialog(int pid){IntPtr found=IntPtr.Zero;int matches=0;EnumWindows((h,p)=>{uint owner;GetWindowThreadProcessId(h,out owner);if(owner!=(uint)pid)return true;var s=new StringBuilder(128);GetClassNameW(h,s,128);if(s.ToString()=="#32770"){found=h;matches++;}return true;},IntPtr.Zero);return matches==1?found:IntPtr.Zero;}
  public static IntPtr Find(int pid){IntPtr found=IntPtr.Zero;EnumWindows((h,p)=>{uint owner;GetWindowThreadProcessId(h,out owner);if(owner!=(uint)pid)return true;var s=new StringBuilder(128);GetClassNameW(h,s,128);if(s.ToString()!="RustyNote.Native")return true;found=h;return false;},IntPtr.Zero);return found;}
 }
 '@
@@ -82,6 +85,23 @@ foreach($theme in @('dark','light')){
   $null=[StickerProbe]::SendMessageW($hwnd,0x8007,[IntPtr]1,[IntPtr]::Zero);Start-Sleep -Milliseconds 350
   $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$dropped=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
   if($dropped.selected -ne $dropName){throw 'Unicode native file drop failed'}
+  foreach($step in 1..4){$null=[StickerProbe]::SendMessageW($hwnd,0x111,[IntPtr]211,[IntPtr]::Zero)}
+  $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$zoomed=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+  if([math]::Abs($zoomed.zoom-1.4) -gt 0.001 -or $zoomed.font_measurements -le $dropped.font_measurements){throw 'Larger text did not prepare actual scaled fonts'}
+  Capture $hwnd (Join-Path $out "$theme-zoom-narrow.png")
+  $null=[StickerProbe]::SetWindowPos($hwnd,[IntPtr]::Zero,0,0,600,760,0x16)
+  $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$zoomWide=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+  if($zoomWide.font_measurements -ne $zoomed.font_measurements){throw 'Resize at enlarged text measured fonts again'}
+  Capture $hwnd (Join-Path $out "$theme-zoom-wide.png")
+  foreach($page in 1..3){$null=[StickerProbe]::SendMessageW($hwnd,0x100,[IntPtr]0x22,[IntPtr]::Zero);Capture $hwnd (Join-Path $out "$theme-zoom-page-$page.png")}
+  $null=[StickerProbe]::SendMessageW($hwnd,0x100,[IntPtr]0x24,[IntPtr]::Zero)
+  $null=[StickerProbe]::SetWindowPos($hwnd,[IntPtr]::Zero,0,0,360,500,0x16)
+  foreach($step in 1..20){$null=[StickerProbe]::SendMessageW($hwnd,0x111,[IntPtr]211,[IntPtr]::Zero)}
+  $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$zoomMax=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+  if([math]::Abs($zoomMax.zoom-1.6) -gt 0.001){throw 'Reading zoom upper bound failed'}
+  $null=[StickerProbe]::SendMessageW($hwnd,0x111,[IntPtr]213,[IntPtr]::Zero)
+  $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$reset=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+  if($reset.zoom -ne 1){throw 'Reading zoom reset failed'}
   $null=[StickerProbe]::SendMessageW($hwnd,0x8007,[IntPtr]2,[IntPtr]::Zero)
   $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$rejected=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
   if($rejected.selected -ne $dropped.selected){throw 'Multiple-file drop replaced selection'}
@@ -114,9 +134,26 @@ foreach($theme in @('dark','light')){
   $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$reloaded=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
   if($reloaded.scroll -ne $scrolled.scroll -or $reloaded.font_measurements -le $scrolled.font_measurements){throw 'External reload did not retain reading position/update layout'}
   Capture $hwnd (Join-Path $out "$theme-reloaded.png")
+  # Hide only the copied source to exercise recoverable read errors.
+  $gone=$dropMd+'.gone';Move-Item -LiteralPath $dropMd -Destination $gone;Start-Sleep -Milliseconds 350
+  $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$readError=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+  if(!$readError.error -or $readError.selected -ne $dropName){throw 'Missing source discarded the reading view or hid its error'}
+  Capture $hwnd (Join-Path $out "$theme-read-error.png")
+  $null=[StickerProbe]::PostMessageW($hwnd,0x111,[IntPtr]214,[IntPtr]::Zero);Start-Sleep -Milliseconds 250
+  $details=[StickerProbe]::Dialog($p.Id);if($details -eq [IntPtr]::Zero){throw 'Full native error message missing'}
+  Capture $details (Join-Path $out "$theme-error-details.png")
+  $ok=[StickerProbe]::DialogButton($details);if($ok -eq [IntPtr]::Zero){throw 'Owned error dialog OK button missing'}
+  $null=[StickerProbe]::PostMessageW($ok,0xF5,[IntPtr]::Zero,[IntPtr]::Zero);Start-Sleep -Milliseconds 250
+  if([StickerProbe]::Dialog($p.Id) -ne [IntPtr]::Zero){throw 'Owned error dialog did not dismiss'}
+  Move-Item -LiteralPath $gone -Destination $dropMd
+  $null=[StickerProbe]::SendMessageW($hwnd,0x100,[IntPtr]0x74,[IntPtr]::Zero);Start-Sleep -Milliseconds 250
+  $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$recovered=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+  if($recovered.error -or $recovered.scroll -ne $reloaded.scroll){throw 'F5 did not recover the read view and its position'}
   # Reset only the copied fixture before checking app-originated changes.
   [IO.File]::WriteAllBytes($dropMd,$dropBefore);Start-Sleep -Milliseconds 350
   $null=[StickerProbe]::SendMessageW($hwnd,0x100,[IntPtr]0x74,[IntPtr]::Zero);Start-Sleep -Milliseconds 350
+  $null=[StickerProbe]::SendMessageW($hwnd,0x111,[IntPtr]211,[IntPtr]::Zero)
+  $null=[StickerProbe]::SendMessageW($hwnd,0x111,[IntPtr]211,[IntPtr]::Zero)
   $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$idle=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
   $p.Refresh();$cpu=$p.TotalProcessorTime.TotalMilliseconds;Start-Sleep -Milliseconds 1500;$p.Refresh();$delta=$p.TotalProcessorTime.TotalMilliseconds-$cpu
   $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$after=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
@@ -130,7 +167,7 @@ foreach($theme in @('dark','light')){
   $p=Start-Process -FilePath $exe -ArgumentList @('--state-file',('"'+$state+'"'),'--metrics-file',('"'+$metrics+'"')) -PassThru
   if(!$p.WaitForInputIdle(15000)){throw 'Restored sticker not ready'};$hwnd=[StickerProbe]::Find($p.Id);Start-Sleep -Milliseconds 350
   $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$restored=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
-  if($restored.selected -ne $dropName -or [math]::Abs($restored.scroll-$restoreScroll) -gt 0.01){throw 'Reading position did not survive close/reopen'}
+  if($restored.selected -ne $dropName -or [math]::Abs($restored.scroll-$restoreScroll) -gt 0.01 -or [math]::Abs($restored.zoom-$after.zoom) -gt 0.001){throw 'Reading position/text size did not survive close/reopen'}
   Capture $hwnd (Join-Path $out "$theme-restored.png")
   $null=[StickerProbe]::PostMessageW($hwnd,0x10,[IntPtr]::Zero,[IntPtr]::Zero);if(!$p.WaitForExit(10000)){throw 'Restore validation close failed'}
   $p=Start-Process -FilePath $exe -ArgumentList @(('"'+$md+'"'),'--state-file',('"'+$state+'"'),'--metrics-file',('"'+$metrics+'"')) -PassThru
@@ -138,6 +175,7 @@ foreach($theme in @('dark','light')){
   $null=[StickerProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero);$other=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
   if($other.selected -ne 'Sticker' -or $other.scroll -ne 0){throw 'Different file inherited the saved reading offset'}
   Write-Output "$theme read-only usability checks passed; idle CPU $delta ms"
- }finally{if(!$p.HasExited){$null=[StickerProbe]::PostMessageW([StickerProbe]::Find($p.Id),0x10,[IntPtr]::Zero,[IntPtr]::Zero);if(!$p.WaitForExit(10000)){Stop-Process -Id $p.Id -Force;throw 'Owned sticker did not close'}}}
+ }catch{Write-Output ("Native validation failure: "+$_.Exception.Message);throw}
+ finally{if(!$p.HasExited){$modal=[StickerProbe]::Dialog($p.Id);if($modal -ne [IntPtr]::Zero){$null=[StickerProbe]::PostMessageW($modal,0x10,[IntPtr]::Zero,[IntPtr]::Zero);Start-Sleep -Milliseconds 150};$null=[StickerProbe]::PostMessageW([StickerProbe]::Find($p.Id),0x10,[IntPtr]::Zero,[IntPtr]::Zero);if(!$p.WaitForExit(10000)){Stop-Process -Id $p.Id -Force;throw 'Owned test-process did not close cleanly'}}}
 }
 Write-Output "Sticker validation passed. Artifacts: $out"

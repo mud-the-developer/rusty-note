@@ -35,6 +35,19 @@ impl Font {
         }
     }
 }
+pub fn reading_zoom(zoom: f32) -> f32 {
+    if zoom.is_finite() {
+        (zoom.clamp(0.8, 1.6) * 10.0).round() / 10.0
+    } else {
+        1.0
+    }
+}
+impl Font {
+    fn zoomed(mut self, zoom: f32) -> Self {
+        self.size = (f32::from(self.size) * reading_zoom(zoom)).round() as u16;
+        self
+    }
+}
 pub trait FontMeasure {
     fn width(&self, text: &str, font: Font) -> f64;
 }
@@ -190,6 +203,9 @@ pub struct Scene {
 }
 impl Scene {
     pub fn new(doc: &Document, meter: &dyn FontMeasure) -> Self {
+        Self::with_zoom(doc, meter, 1.0)
+    }
+    pub fn with_zoom(doc: &Document, meter: &dyn FontMeasure, zoom: f32) -> Self {
         let blocks = doc
             .blocks
             .iter()
@@ -218,7 +234,7 @@ impl Scene {
                                         &cell.runs,
                                         Font {
                                             bold: index == 0,
-                                            ..Font::for_kind(Kind::Table)
+                                            ..Font::for_kind(Kind::Table).zoomed(zoom)
                                         },
                                         meter,
                                     )
@@ -234,7 +250,7 @@ impl Scene {
                     text: Box::new(Prepared::new(
                         &b.text,
                         &b.runs,
-                        Font::for_kind(b.kind),
+                        Font::for_kind(b.kind).zoomed(zoom),
                         meter,
                     )),
                 },
@@ -373,6 +389,39 @@ mod tests {
         let passes = scene.layout_passes;
         scene.reflow(360.0);
         assert_eq!(passes, scene.layout_passes);
+    }
+    #[test]
+    fn reading_zoom_uses_scaled_fonts_and_keeps_resize_cached() {
+        let meter = Meter(Cell::new(0));
+        let doc = Document::parse(include_str!("../tests/fixtures/reader-comfort.md"));
+        let mut scene = Scene::with_zoom(&doc, &meter, 1.5);
+        let calls = meter.0.get();
+        for width in [260.0, 600.0, 260.0] {
+            scene.reflow(width);
+            assert_eq!(meter.0.get(), calls);
+            assert!(
+                scene
+                    .lines
+                    .iter()
+                    .any(|line| line.font.size == 24 && line.kind == Kind::Paragraph)
+            );
+            assert!(
+                scene
+                    .lines
+                    .iter()
+                    .any(|line| line.font.size == 45 && matches!(line.kind, Kind::Heading(1)))
+            );
+            assert!(scene.cells.len() >= 4);
+            assert!(
+                scene
+                    .lines
+                    .iter()
+                    .all(|line| line.y.is_finite() && line.height > 0.0)
+            );
+        }
+        assert_eq!(reading_zoom(f32::NAN), 1.0);
+        assert_eq!(reading_zoom(9.0), 1.6);
+        assert_eq!(reading_zoom(0.0), 0.8);
     }
     #[test]
     fn tables_are_real_cells_and_surrounding_content_survives() {

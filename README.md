@@ -26,6 +26,14 @@ Default size: 360x500. Last file/placement/reading position use
 `%LOCALAPPDATA%\RustyNote\sticker-state.json`. Reopening the same file resumes reading;
 opening a different file starts at the top.
 
+**Ctrl++ / Ctrl+- / Ctrl+0** enlarge/reduce/reset document text (80–160%).
+**Ctrl+wheel** and the right-click menu provide the same controls. The percentage
+appears in the status bar; text size is remembered separately from the source.
+Fonts are prepared with actual native measurements at the chosen size, not bitmap zoom.
+If reading fails, click the colored error status (or Error details in the menu) for
+the full path/message. Restore the file and press **F5**; the last read view is kept.
+Changing text size keeps an approximate reading area, not an exact paragraph anchor.
+
 External changes refresh the document without losing your reading position. Unrelated
 folder changes do not remeasure fonts. Old/off-screen placement is recovered into the
 nearest monitor work area. [REA reference review and coverage](docs/reference-review.md).

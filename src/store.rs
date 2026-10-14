@@ -59,6 +59,7 @@ pub struct State {
     pub selected: Option<PathBuf>,
     pub notes_dir: Option<PathBuf>,
     pub scroll: f32,
+    pub zoom: f32,
 }
 impl Default for State {
     fn default() -> Self {
@@ -72,6 +73,7 @@ impl Default for State {
             selected: None,
             notes_dir: None,
             scroll: 0.0,
+            zoom: 1.0,
         }
     }
 }
@@ -88,6 +90,7 @@ impl State {
                 state.height = state.height.clamp(420, 1600);
                 state.x = state.x.clamp(-32000, 32000);
                 state.y = state.y.clamp(-32000, 32000);
+                state.zoom = crate::layout::reading_zoom(state.zoom);
                 state.scroll = if state.scroll.is_finite() {
                     state.scroll.max(0.0)
                 } else {
@@ -115,6 +118,7 @@ mod tests {
         assert_eq!(state.width, 460);
         assert!(state.pinned);
         assert_eq!(state.scroll, 0.0);
+        assert_eq!(state.zoom, 1.0);
     }
     #[test]
     fn reading_position_round_trips_without_changing_old_state_defaults() {
@@ -122,12 +126,14 @@ mod tests {
         let path = root.join("state.json");
         let state = State {
             scroll: 420.0,
+            zoom: 1.4,
             selected: Some(PathBuf::from("view.md")),
             ..Default::default()
         };
         state.save(&path).unwrap();
         let loaded = State::load(&path);
         assert_eq!(loaded.scroll, 420.0);
+        assert_eq!(loaded.zoom, 1.4);
         assert_eq!(loaded.selected, state.selected);
         fs::remove_dir_all(root).unwrap();
     }

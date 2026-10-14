@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.4 — text size and recoverable read errors
+
+- Bounded 80–160% reading text size with Ctrl++/Ctrl+-/Ctrl+0, Ctrl+wheel and menu controls.
+- Measure the actual scaled DirectWrite fonts; window resize remains cached.
+- Persist text size in app state; source Markdown remains untouched.
+- Show a distinct clickable error status and a complete native error dialog with the path.
+- Keep the last read view while a file is unavailable; F5 clears the resolved error.
+- Mixed reader-comfort fixture, scaled-font/layout/state regressions and native
+  normal/narrow light/dark zoom, popup/recovery, source-byte and idle checks.
+
 ## 0.3.3 — reader controls and resume
 
 - Clear Open label and per-control hover help without a tooltip polling timer.

@@ -219,7 +219,9 @@ impl App {
                             options.file = Some(note.path.clone());
                             notes = vec![note];
                         }
-                        Err(e) => error = Some(e.to_string()),
+                        Err(e) => {
+                            error = Some(format!("Could not open {}\n\n{}", path.display(), e))
+                        }
                     }
                 }
             }
@@ -231,7 +233,11 @@ impl App {
             let source = notes.get(selected).and_then(|note| crate::edit::read_note(&note.path).ok())
             .unwrap_or_else(|| "# Markdown sticker\n\nDrop one .md file here, or press Ctrl+O to open it.\n\nDrag the header to place this small window. P keeps it above other windows.\n\nThe original Markdown is read-only.".into());
             let viewer_source = (!options.editor_mode).then(|| source.clone());
-            let mut scene = Scene::new(&Document::parse(&source), &fonts);
+            let mut scene = Scene::with_zoom(
+                &Document::parse(&source),
+                &fonts,
+                if options.editor_mode { 1.0 } else { state.zoom },
+            );
             scene.reflow(state.width as f32 - 72.0);
             let scroll = if !options.editor_mode
                 && notes
@@ -875,11 +881,25 @@ impl App {
                 )?;
             }
             target.PopAxisAlignedClip();
+            let size_hint = format!(
+                "READ ONLY  ·  {}%  ·  Ctrl+wheel zoom",
+                (self.state.zoom * 100.0).round() as u32
+            );
             self.text(
-                self.error.as_deref().unwrap_or(self.reading_hint()),
+                if self.error.is_some() {
+                    "Read error  ·  click for details  ·  F5 retry"
+                } else if !self.options.editor_mode && self.hover_region(self.hover) == -1 {
+                    &size_hint
+                } else {
+                    self.reading_hint()
+                },
                 tiny,
                 rect(27.0, self.height - 34.0, self.width - 60.0, 20.0),
-                palette.muted,
+                if self.error.is_some() {
+                    if self.state.light { 0xAA3A2A } else { 0xFFAA88 }
+                } else {
+                    palette.muted
+                },
                 1.0,
             )?;
             if let Some(bar) = crate::viewer::Scrollbar::new(self.scene.height, self.height) {
@@ -934,7 +954,8 @@ impl App {
                 self.notes = vec![note];
                 self.selected = 0;
                 self.images.clear();
-                self.scene = Scene::new(&Document::parse(&text), &self.fonts);
+                self.scene =
+                    Scene::with_zoom(&Document::parse(&text), &self.fonts, self.state.zoom);
                 self.reflow();
                 self.scroll = crate::viewer::reload_scroll(
                     previous_scroll,
@@ -952,10 +973,48 @@ impl App {
                 }
             }
             Err(error) => {
-                self.error = Some(error.to_string());
+                self.error = Some(format!("Could not open {}\n\n{}", path.display(), error));
                 unsafe {
                     let _ = InvalidateRect(Some(self.hwnd), None, false);
                 }
+            }
+        }
+    }
+    fn change_zoom(&mut self, zoom: f32) {
+        if self.options.editor_mode {
+            return;
+        }
+        let zoom = crate::layout::reading_zoom(zoom);
+        let Some(source) = self.viewer_source.as_deref() else {
+            return;
+        };
+        if zoom == self.state.zoom {
+            return;
+        }
+        let old = self.state.zoom;
+        let previous_scroll = self.scroll;
+        self.state.zoom = zoom;
+        self.scene = Scene::with_zoom(&Document::parse(source), &self.fonts, zoom);
+        self.reflow();
+        self.scroll = crate::viewer::reload_scroll(
+            previous_scroll * zoom / old,
+            self.scene.height,
+            self.height - 160.0,
+        );
+        unsafe {
+            let _ = InvalidateRect(Some(self.hwnd), None, false);
+        }
+    }
+    unsafe fn show_error(&self) {
+        if let Some(error) = &self.error {
+            let text: Vec<u16> = error.encode_utf16().chain([0]).collect();
+            unsafe {
+                MessageBoxW(
+                    Some(self.hwnd),
+                    PCWSTR(text.as_ptr()),
+                    w!("MD Sticker — read error"),
+                    MB_OK | MB_ICONWARNING,
+                );
             }
         }
     }
@@ -978,9 +1037,21 @@ impl App {
                     (208, "Rename note\tF2"),
                     (209, "Move note to trash"),
                     (210, "Open note trash"),
+                    (211, "Larger text\tCtrl++"),
+                    (212, "Smaller text\tCtrl+-"),
+                    (213, "Reset text size\tCtrl+0"),
+                    (214, "Error details"),
                     (207, "Quit"),
                 ] {
-                    if !self.options.editor_mode && ![204, 205, 206, 207].contains(&id) {
+                    if self.options.editor_mode && id >= 211 {
+                        continue;
+                    }
+                    if id == 214 && self.error.is_none() {
+                        continue;
+                    }
+                    if !self.options.editor_mode
+                        && ![204, 205, 206, 207, 211, 212, 213, 214].contains(&id)
+                    {
                         continue;
                     }
                     let label = if !self.options.editor_mode && id == 205 {
@@ -1163,6 +1234,8 @@ impl App {
                     );
                     let _ = InvalidateRect(Some(self.hwnd), None, false);
                 }
+            } else if self.error.is_some() && y > self.height - 42.0 {
+                self.show_error();
             } else if self.library && x < 160.0 && y >= 112.0 {
                 self.select(self.library_scroll + ((y - 112.0) / 48.0) as usize);
             } else if self.editor.is_none() {
@@ -1255,7 +1328,7 @@ impl App {
             "font_measurements":self.fonts.measurements.get(),"prepare_blocks":self.scene.prepare_passes,
             "layout_passes":self.scene.layout_passes,"paint_count":self.paints,"animation_active":self.motion.active(),
             "lines":self.scene.lines.len(),"width_dip":self.width,"height_dip":self.height,
-            "selected":self.notes.get(self.selected).map(|n| &n.title),"read_only":!self.options.editor_mode,"scroll":self.scroll,"pinned":self.state.pinned,"light":self.state.light,"hint":self.reading_hint(),"scroll_thumb_top":crate::viewer::Scrollbar::new(self.scene.height,self.height).map(|bar|bar.thumb_top(self.scroll)),"scroll_thumb_size":crate::viewer::Scrollbar::new(self.scene.height,self.height).map(|bar|bar.thumb),"scale":self.scale,"error":self.error,"table_cells":self.scene.cells.len(),"images":self.scene.images.len(),"styled_runs":self.scene.lines.iter().map(|l|l.runs.iter().filter(|r|r.style.bold||r.style.italic||r.style.code||r.style.link.is_some()||r.style.strike).count()).sum::<usize>()})
+            "selected":self.notes.get(self.selected).map(|n| &n.title),"read_only":!self.options.editor_mode,"scroll":self.scroll,"pinned":self.state.pinned,"light":self.state.light,"hint":self.reading_hint(),"scroll_thumb_top":crate::viewer::Scrollbar::new(self.scene.height,self.height).map(|bar|bar.thumb_top(self.scroll)),"scroll_thumb_size":crate::viewer::Scrollbar::new(self.scene.height,self.height).map(|bar|bar.thumb),"scale":self.scale,"zoom":self.state.zoom,"error":self.error,"table_cells":self.scene.cells.len(),"images":self.scene.images.len(),"styled_runs":self.scene.lines.iter().map(|l|l.runs.iter().filter(|r|r.style.bold||r.style.italic||r.style.code||r.style.link.is_some()||r.style.strike).count()).sum::<usize>()})
     }
 }
 
@@ -1491,6 +1564,11 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
             }
             WM_MOUSEWHEEL => {
                 let delta = ((w.0 >> 16) & 0xffff) as i16 as f32;
+                if !app.options.editor_mode && GetKeyState(0x11) < 0 {
+                    let zoom = app.state.zoom + if delta > 0.0 { 0.1 } else { -0.1 };
+                    app.change_zoom(zoom);
+                    return LRESULT(0);
+                }
                 if app.library && app.hover.0 < 160.0 {
                     app.library_scroll = if delta < 0.0 {
                         (app.library_scroll + 1).min(app.notes.len().saturating_sub(1))
@@ -1629,7 +1707,17 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                 {
                     return LRESULT(0);
                 }
-                if command == 205 && !app.options.editor_mode {
+                if command == 211 {
+                    let zoom = app.state.zoom + 0.1;
+                    app.change_zoom(zoom);
+                } else if command == 212 {
+                    let zoom = app.state.zoom - 0.1;
+                    app.change_zoom(zoom);
+                } else if command == 213 {
+                    app.change_zoom(1.0);
+                } else if command == 214 {
+                    app.show_error();
+                } else if command == 205 && !app.options.editor_mode {
                     app.choose_markdown();
                 } else if command == 204 {
                     crate::desktop::open_folder(hwnd, &app.options.notes_dir);
@@ -1900,6 +1988,9 @@ pub fn run(options: Options) -> Result<()> {
                     0x0d => Some(203),
                     0x4f => Some(205),
                     0x48 => Some(206),
+                    0xBB | 0x6B => Some(211),
+                    0xBD | 0x6D => Some(212),
+                    0x30 | 0x60 => Some(213),
                     _ => None,
                 };
                 if let Some(command) = command {

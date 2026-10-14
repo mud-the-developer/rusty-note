@@ -1,5 +1,26 @@
 # Simple read-only sticker checks
 
+## 0.3.4 text comfort and errors
+
+Twenty-five core tests passed. Scaled Scene fonts and mixed tables/code are checked
+at normal/narrow widths, with no extra font calls on resize. State keeps the bounded
+zoom preference, with old JSON still defaulting to 100%. Native tests exercise
+larger/reset/limit menu commands, 140% owned-window captures including tables/code,
+120% close/reopen preference, source bytes, idle paints and the missing-file path.
+
+The driver temporarily renames only a copied fixture, checks the last read view
+survives, opens/captures the full owned native message, restores the fixture and
+retries with F5. It locates exactly one native dialog button instead of assuming
+IDOK: this host's single confirmation button had ID2. Early driver failures were
+not app passes; final checks dismiss that button and require clean owned-process close.
+Only app-owned windows/popup pixels are captured. No original fixture/user file,
+global state or unowned dialog is altered.
+
+Ctrl keyboard/wheel dispatch is implemented and reviewed; native menu-command
+routes are automated, not global keyboard injection. Live DPI/assistive technology
+and simultaneous state saves remain manual/stress gaps. Text-size changes preserve
+an approximate reading area; exact logical paragraph anchors are not claimed.
+
 ## 0.3.3 reader usability
 
 Twenty-four core tests passed, including scrollbar endpoint/grab-offset mapping
