@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.7 — frosted-glass icon and warm themes
+
+- Refine the supplied pixel artwork into transparent PNG and eight-size Windows ICO assets.
+- Add a translucent charcoal glass squircle, layered light rim, copper reflections and soft paper shadow.
+- Embed the icon in the executable with the Windows SDK; use it for the window and tray.
+- Share warm paper/charcoal/copper palettes between reader and native editor.
+- Test small-text contrast on selected/search surfaces and preserve source/layout behavior.
+- Verify native icon pixels, normal/narrow theme captures, existing reader/editor flows and idle.
+
 ## 0.3.6 — aligned tables and precise table links
 
 - Apply existing Markdown left/center/right column metadata to headers and wrapped cells.

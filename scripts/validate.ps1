@@ -21,6 +21,10 @@ public static class NoteProbe {
     [DllImport("user32.dll")] public static extern IntPtr SendMessageW(IntPtr h,uint m,IntPtr w,IntPtr l);
     [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h,uint m,IntPtr w,IntPtr l);
     [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr h,int id);
+    [DllImport("user32.dll")] public static extern IntPtr GetClassLongPtrW(IntPtr h,int index);
+    [DllImport("shell32.dll",CharSet=CharSet.Unicode)] public static extern uint ExtractIconExW(string path,int index,out IntPtr large,out IntPtr small,uint count);
+    [DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr icon);
+    [DllImport("user32.dll",CharSet=CharSet.Unicode)] public static extern IntPtr LoadImageW(IntPtr instance,string name,uint kind,int width,int height,uint flags);
     [DllImport("user32.dll",CharSet=CharSet.Unicode,EntryPoint="SendMessageW")] public static extern IntPtr SetText(IntPtr h,uint m,IntPtr w,string text);
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h,IntPtr dc,uint f);
     [DllImport("user32.dll")] public static extern bool RedrawWindow(IntPtr h,IntPtr r,IntPtr g,uint f);
@@ -47,6 +51,25 @@ function Capture([IntPtr]$hwnd,[string]$path) {
         $bitmap.Save($path,[Drawing.Imaging.ImageFormat]::Png)
     }finally{$bitmap.Dispose()}
 }
+function CheckIcon([IntPtr]$handle,[string]$name) {
+    if($handle -eq [IntPtr]::Zero){throw 'Rusty Note icon handle missing'}
+    $wrapper=[Drawing.Icon]::FromHandle($handle);$actual=$wrapper.ToBitmap()
+    # Use the Windows loader: .NET's direct ICO bitmap path misreads small PNG frames.
+    $expectedHandle=[NoteProbe]::LoadImageW([IntPtr]::Zero,(Join-Path $root 'assets/rusty-note.ico'),1,$actual.Width,$actual.Height,0x10)
+    if($expectedHandle -eq [IntPtr]::Zero){throw 'Production ICO could not be decoded by Windows'}
+    $expectedIcon=[Drawing.Icon]::FromHandle($expectedHandle);$expected=$expectedIcon.ToBitmap()
+    try {
+        for($y=0;$y -lt $actual.Height;$y++){for($x=0;$x -lt $actual.Width;$x++){
+            if($actual.GetPixel($x,$y).ToArgb() -ne $expected.GetPixel($x,$y).ToArgb()){throw "Embedded/class icon differs from production artwork: $name"}
+        }}
+        $actual.Save((Join-Path $out ($name+'.png')),[Drawing.Imaging.ImageFormat]::Png)
+    }finally{$expected.Dispose();$expectedIcon.Dispose();$null=[NoteProbe]::DestroyIcon($expectedHandle);$actual.Dispose();$wrapper.Dispose()}
+}
+New-Item -ItemType Directory -Force $out | Out-Null
+$large=[IntPtr]::Zero;$small=[IntPtr]::Zero
+$extracted=[NoteProbe]::ExtractIconExW($exe,0,[ref]$large,[ref]$small,1)
+try{if($extracted -lt 1){throw 'Executable icon resource missing'};CheckIcon $large 'exe-icon-large';CheckIcon $small 'exe-icon-small'}
+finally{if($large -ne [IntPtr]::Zero){$null=[NoteProbe]::DestroyIcon($large)};if($small -ne [IntPtr]::Zero){$null=[NoteProbe]::DestroyIcon($small)}}
 foreach($theme in @('dark','light')) {
     $notes=Join-Path $out "$theme-notes-$run"
     New-Item -ItemType Directory -Force $notes | Out-Null
@@ -62,6 +85,8 @@ foreach($theme in @('dark','light')) {
         if(!$p.WaitForInputIdle(15000)){throw 'Native app was not ready'}
         $hwnd=[NoteProbe]::Find($p.Id)
         if($hwnd -eq [IntPtr]::Zero){throw 'Native class not found'}
+        CheckIcon ([NoteProbe]::GetClassLongPtrW($hwnd,-14)) "$theme-window-icon-large"
+        CheckIcon ([NoteProbe]::GetClassLongPtrW($hwnd,-34)) "$theme-window-icon-small"
         Start-Sleep -Milliseconds 600
         $null=[NoteProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero)
         $first=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
@@ -138,4 +163,53 @@ foreach($theme in @('dark','light')) {
         if(!$p.HasExited){$null=[NoteProbe]::PostMessageW([NoteProbe]::Find($p.Id),0x10,[IntPtr]::Zero,[IntPtr]::Zero);if(!$p.WaitForExit(10000)){Stop-Process -Id $p.Id -Force;throw 'Owned app did not close'}}
     }
 }
-Write-Output "Native validation passed. Artifacts: $out"
+# Read-only color fixture: actual owned-window captures, no source/global-state writes.
+foreach($theme in @('dark','light')) {
+    $notes=Join-Path $out "$theme-rusty-$run"
+    New-Item -ItemType Directory -Force $notes | Out-Null
+    $md=Join-Path $notes 'Rusty theme.md'
+    Copy-Item (Join-Path $root 'tests/fixtures/rusty-theme.md') $md
+    Copy-Item (Join-Path $root 'tests/fixtures/fixture.png') (Join-Path $notes 'fixture.png')
+    $before=[Convert]::ToBase64String([IO.File]::ReadAllBytes($md))
+    $state=Join-Path $notes 'state.json';$metrics=Join-Path $notes 'metrics.json'
+    [IO.File]::WriteAllText($state,'{"x":120,"y":100,"width":600,"height":760,"pinned":false}')
+    $argv=@(('"'+$md+'"'),'--state-file',('"'+$state+'"'),'--metrics-file',('"'+$metrics+'"'),'--reduced-motion')
+    if($theme -eq 'light'){$argv+='--light'}
+    $p=Start-Process -FilePath $exe -ArgumentList $argv -PassThru
+    try {
+        if(!$p.WaitForInputIdle(15000)){throw 'Rusty theme viewer not ready'}
+        $hwnd=[NoteProbe]::Find($p.Id);if($hwnd -eq [IntPtr]::Zero){throw 'Owned theme viewer missing'}
+        Start-Sleep -Milliseconds 400
+        $null=[NoteProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero)
+        $first=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+        if(!$first.read_only -or $first.table_cells -ne 8 -or $first.images -ne 1){throw 'Theme fixture structure missing'}
+        $path=Join-Path $out "$theme-rusty-wide.png";Capture $hwnd $path
+        $picture=[Drawing.Bitmap]::new($path)
+        try {
+            $card=if($theme -eq 'light'){[Drawing.Color]::FromArgb(255,251,246,239)}else{[Drawing.Color]::FromArgb(255,36,32,29)}
+            $background=if($theme -eq 'light'){[Drawing.Color]::FromArgb(255,231,222,213)}else{[Drawing.Color]::FromArgb(255,25,23,22)}
+            if($picture.GetPixel(300,66).ToArgb() -ne $card.ToArgb() -or $picture.GetPixel(300,20).ToArgb() -ne $background.ToArgb()){throw 'Rendered palette differs from tested RGB values'}
+        }finally{$picture.Dispose()}
+        $null=[NoteProbe]::PostMessageW($hwnd,0x111,[IntPtr]215,[IntPtr]::Zero);Start-Sleep -Milliseconds 250
+        $prompt=[NoteProbe]::Prompt($p.Id);if($prompt -eq [IntPtr]::Zero){throw 'Theme search prompt missing'}
+        $null=[NoteProbe]::SetText([NoteProbe]::GetDlgItem($prompt,10),0x0c,[IntPtr]::Zero,'copper')
+        $null=[NoteProbe]::PostMessageW($prompt,0x111,[IntPtr]1,[IntPtr]::Zero);Start-Sleep -Milliseconds 200
+        $null=[NoteProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero)
+        $found=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+        if($found.find_count -lt 3){throw 'Theme search marks missing'}
+        Capture $hwnd (Join-Path $out "$theme-rusty-search.png")
+        $null=[NoteProbe]::SendMessageW($hwnd,0x100,[IntPtr]0x1b,[IntPtr]::Zero)
+        $null=[NoteProbe]::SendMessageW($hwnd,0x100,[IntPtr]0x24,[IntPtr]::Zero)
+        $null=[NoteProbe]::SetWindowPos($hwnd,[IntPtr]::Zero,0,0,360,640,0x16)
+        Capture $hwnd (Join-Path $out "$theme-rusty-narrow.png")
+        $null=[NoteProbe]::SendMessageW($hwnd,0x8001,[IntPtr]::Zero,[IntPtr]::Zero)
+        $narrow=[IO.File]::ReadAllText($metrics)|ConvertFrom-Json
+        if($narrow.font_measurements -ne $first.font_measurements){throw 'Theme resize/search remeasured fonts'}
+        $null=[NoteProbe]::SendMessageW($hwnd,0x100,[IntPtr]0x23,[IntPtr]::Zero)
+        Capture $hwnd (Join-Path $out "$theme-rusty-bottom.png")
+    }finally{
+        if(!$p.HasExited){$prompt=[NoteProbe]::Prompt($p.Id);if($prompt -ne [IntPtr]::Zero){$null=[NoteProbe]::PostMessageW($prompt,0x111,[IntPtr]2,[IntPtr]::Zero);Start-Sleep -Milliseconds 100};$null=[NoteProbe]::PostMessageW([NoteProbe]::Find($p.Id),0x10,[IntPtr]::Zero,[IntPtr]::Zero);if(!$p.WaitForExit(10000)){Stop-Process -Id $p.Id -Force;throw 'Owned theme viewer did not close'}}
+    }
+    if([Convert]::ToBase64String([IO.File]::ReadAllBytes($md)) -ne $before){throw 'Theme viewer modified Markdown bytes'}
+}
+Write-Output "Native icon, theme and editor validation passed. Artifacts: $out"

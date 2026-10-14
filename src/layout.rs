@@ -599,6 +599,31 @@ mod tests {
         }
     }
     #[test]
+    fn rusty_theme_fixture_wraps_all_text_surfaces_without_remeasurement() {
+        let meter = Meter(Cell::new(0));
+        let doc = Document::parse(include_str!("../tests/fixtures/rusty-theme.md"));
+        let mut scene = Scene::new(&doc, &meter);
+        let calls = meter.0.get();
+        for width in [550.0, 270.0, 550.0] {
+            scene.reflow(width);
+            assert_eq!(scene.cells.len(), 8);
+            assert_eq!(scene.images.len(), 1);
+            assert!(
+                scene
+                    .cells
+                    .iter()
+                    .all(|cell| cell.x + cell.width <= width + 0.1)
+            );
+            for kind in [Kind::Quote, Kind::Code, Kind::Table] {
+                assert!(scene.lines.iter().any(|line| line.kind == kind));
+            }
+            assert!(scene.find("copper").len() >= 3);
+            assert_eq!(scene.find("final paragraph").len(), 1);
+            assert!(scene.height.is_finite());
+            assert_eq!(meter.0.get(), calls);
+        }
+    }
+    #[test]
     fn tables_are_real_cells_and_surrounding_content_survives() {
         let meter = Meter(Cell::new(0));
         let doc = Document::parse(

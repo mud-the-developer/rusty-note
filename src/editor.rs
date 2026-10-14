@@ -1,5 +1,5 @@
 //! Native Unicode editor: Windows supplies selection, undo, clipboard and IME.
-use crate::edit::EditBuffer;
+use crate::{edit::EditBuffer, theme::Palette};
 use std::path::Path;
 use windows::{
     Win32::{
@@ -9,6 +9,11 @@ use windows::{
     },
     core::{PCWSTR, Result, w},
 };
+
+fn colorref(rgb: u32) -> COLORREF {
+    // GDI stores BGR; Direct2D and the shared palette use RGB.
+    COLORREF((rgb & 255) << 16 | (rgb & 0xff00) | (rgb >> 16 & 255))
+}
 
 pub struct Editor {
     pub hwnd: HWND,
@@ -101,17 +106,18 @@ impl Editor {
         }
     }
     pub fn paint_background(&mut self, dc: HDC, light: bool) -> HBRUSH {
+        let palette = Palette::new(light);
+        let background = colorref(palette.card);
         unsafe {
             if self.background.0.is_null() || self.background_light != light {
                 if !self.background.0.is_null() {
                     let _ = DeleteObject(HGDIOBJ(self.background.0));
                 }
-                self.background =
-                    CreateSolidBrush(COLORREF(if light { 0x00f7fcff } else { 0x002d1c11 }));
+                self.background = CreateSolidBrush(background);
                 self.background_light = light;
             }
-            let _ = SetBkColor(dc, COLORREF(if light { 0x00f7fcff } else { 0x002d1c11 }));
-            let _ = SetTextColor(dc, COLORREF(if light { 0x00292520 } else { 0x00fbf0e7 }));
+            let _ = SetBkColor(dc, background);
+            let _ = SetTextColor(dc, colorref(palette.ink));
             self.background
         }
     }
@@ -139,5 +145,16 @@ impl Drop for Editor {
                 let _ = DeleteObject(HGDIOBJ(self.font.0));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn palette_rgb_converts_to_native_editor_bgr() {
+        assert_eq!(colorref(0x123456), COLORREF(0x563412));
+        assert_eq!(colorref(0xffffff), COLORREF(0xffffff));
+        assert_eq!(colorref(0), COLORREF(0));
     }
 }

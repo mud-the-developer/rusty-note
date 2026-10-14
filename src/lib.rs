@@ -9,6 +9,8 @@ pub mod placement;
 #[cfg(windows)]
 pub mod prompt;
 pub mod store;
+#[cfg(any(windows, test))]
+mod theme;
 pub mod viewer;
 
 #[cfg(windows)]

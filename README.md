@@ -5,6 +5,16 @@ Open a `.md` file, drag the small card onto your desktop, and pin it above other
 Native rounded cards, real DirectWrite font metrics, cached Pretext layout and event-driven idle. No Electron, browser,
 WebView, JavaScript runtime or GPUI framework.
 
+## Icon and themes
+
+The [frosted-glass icon](assets/rusty-note.png) keeps the supplied artwork's folded paper
+and copper patina, inside a translucent charcoal squircle with a light rim and copper reflections.
+Its eight-size Windows ICO is
+embedded in the executable and used by the window and tray; no separate icon file is needed.
+Light mode uses warm paper and dark ink; dark mode uses charcoal and cream ink.
+Copper accents and quieter text are contrast-tested, including selected/search surfaces.
+[Icon/theme validation and limits](docs/icon-theme-validation.md).
+
 ## Download
 
 [Windows releases](https://github.com/mud-the-developer/rusty-note/releases).

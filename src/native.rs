@@ -3,6 +3,7 @@ use crate::{
     layout::{Font, FontMeasure, Scene},
     motion::Motion,
     store::{self, Note, State},
+    theme::Palette,
 };
 use pulldown_cmark::Alignment;
 use std::{
@@ -98,41 +99,6 @@ impl FontMeasure for Fonts {
     }
 }
 
-#[derive(Clone, Copy)]
-struct Palette {
-    background: u32,
-    card: u32,
-    panel: u32,
-    ink: u32,
-    muted: u32,
-    accent: u32,
-    line: u32,
-}
-impl Palette {
-    fn new(light: bool) -> Self {
-        if light {
-            Self {
-                background: 0xe8e6df,
-                card: 0xfffdf6,
-                panel: 0xf4f0e6,
-                ink: 0x263a39,
-                muted: 0x74837a,
-                accent: 0x167d68,
-                line: 0xd5ddd4,
-            }
-        } else {
-            Self {
-                background: 0x090f1b,
-                card: 0x111c2d,
-                panel: 0x172538,
-                ink: 0xe7f0fb,
-                muted: 0x8197ad,
-                accent: 0x85e6cb,
-                line: 0x26394d,
-            }
-        }
-    }
-}
 fn color(rgb: u32, alpha: f32) -> D2D1_COLOR_F {
     D2D1_COLOR_F {
         r: ((rgb >> 16) & 255) as f32 / 255.0,
@@ -427,15 +393,7 @@ impl App {
                     self.scroll = 0.0;
                     self.reflow();
                     self.error = None;
-                    let title = format!(
-                        "{} — {}",
-                        if self.options.editor_mode {
-                            "Rusty Note"
-                        } else {
-                            "MD Sticker"
-                        },
-                        self.notes[index].title
-                    );
+                    let title = format!("Rusty Note — {}", self.notes[index].title);
                     let wide: Vec<u16> = title.encode_utf16().chain([0]).collect();
                     let _ = SetWindowTextW(self.hwnd, PCWSTR(wide.as_ptr()));
                     self.animate();
@@ -578,11 +536,7 @@ impl App {
             );
             self.fill(rect(30.0, 48.0, 38.0, 3.0), 1.5, palette.accent, 0.85);
             self.text(
-                if self.options.editor_mode {
-                    "RUSTY NOTE"
-                } else {
-                    "MD STICKER"
-                },
+                "RUSTY NOTE",
                 tiny,
                 rect(
                     if self.options.editor_mode {
@@ -933,7 +887,7 @@ impl App {
                 tiny,
                 rect(27.0, self.height - 34.0, self.width - 60.0, 20.0),
                 if self.error.is_some() {
-                    if self.state.light { 0xAA3A2A } else { 0xFFAA88 }
+                    palette.error
                 } else {
                     palette.muted
                 },
@@ -1004,7 +958,7 @@ impl App {
                 );
                 self.error = None;
                 unsafe {
-                    let title: Vec<u16> = format!("MD Sticker — {}", self.notes[0].title)
+                    let title: Vec<u16> = format!("Rusty Note — {}", self.notes[0].title)
                         .encode_utf16()
                         .chain([0])
                         .collect();
@@ -1052,7 +1006,7 @@ impl App {
                 MessageBoxW(
                     Some(self.hwnd),
                     PCWSTR(text.as_ptr()),
-                    w!("MD Sticker — read error"),
+                    w!("Rusty Note — read error"),
                     MB_OK | MB_ICONWARNING,
                 );
             }
@@ -1977,15 +1931,17 @@ pub fn run(options: Options) -> Result<()> {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
         let instance = GetModuleHandleW(None)?;
-        let class = WNDCLASSW {
+        let class = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(window_proc),
-            hIcon: LoadIconW(None, IDI_APPLICATION)?,
+            hIcon: crate::desktop::app_icon(false)?,
+            hIconSm: crate::desktop::app_icon(true)?,
             hInstance: HINSTANCE(instance.0),
             hCursor: LoadCursorW(None, IDC_ARROW)?,
             lpszClassName: w!("RustyNote.Native"),
             ..Default::default()
         };
-        if RegisterClassW(&class) == 0 {
+        if RegisterClassExW(&class) == 0 {
             return Err(windows::core::Error::from_hresult(
                 windows::core::HRESULT::from_win32(GetLastError().0),
             ));
@@ -2061,12 +2017,7 @@ pub fn run(options: Options) -> Result<()> {
             let mut app = (*ptr).borrow_mut();
             app.resources()?;
             let title = format!(
-                "{} — {}",
-                if app.options.editor_mode {
-                    "Rusty Note"
-                } else {
-                    "MD Sticker"
-                },
+                "Rusty Note — {}",
                 app.notes
                     .get(app.selected)
                     .map(|note| note.title.as_str())

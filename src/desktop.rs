@@ -5,12 +5,29 @@ use windows::{
         Foundation::*,
         Graphics::Gdi::*,
         Storage::FileSystem::*,
-        System::Com::CoTaskMemFree,
+        System::{Com::CoTaskMemFree, LibraryLoader::GetModuleHandleW},
         UI::{Shell::*, WindowsAndMessaging::*},
     },
     core::{PCWSTR, Result, w},
 };
 pub const TRAY_MESSAGE: u32 = 0x8005;
+
+pub fn app_icon(small: bool) -> Result<HICON> {
+    unsafe {
+        let instance = GetModuleHandleW(None)?;
+        // Shared module resources live for the process; callers must not destroy them.
+        let icon = LoadImageW(
+            Some(HINSTANCE(instance.0)),
+            PCWSTR(std::ptr::without_provenance(1)),
+            IMAGE_ICON,
+            GetSystemMetrics(if small { SM_CXSMICON } else { SM_CXICON }),
+            GetSystemMetrics(if small { SM_CYSMICON } else { SM_CYICON }),
+            LR_SHARED,
+        )?;
+        Ok(HICON(icon.0))
+    }
+}
+
 pub struct Tray {
     data: NOTIFYICONDATAW,
 }
@@ -23,7 +40,7 @@ impl Tray {
                 uID: 1,
                 uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
                 uCallbackMessage: TRAY_MESSAGE,
-                hIcon: LoadIconW(None, IDI_APPLICATION)?,
+                hIcon: app_icon(true)?,
                 ..Default::default()
             };
             for (dst, src) in data

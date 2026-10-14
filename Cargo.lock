@@ -77,7 +77,7 @@ dependencies = [
 
 [[package]]
 name = "rusty-note"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "gpui-pretext",
  "pulldown-cmark",

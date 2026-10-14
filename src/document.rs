@@ -289,6 +289,26 @@ impl Document {
 mod tests {
     use super::*;
     #[test]
+    fn rusty_theme_fixture_keeps_contrast_samples_structured() {
+        let doc = Document::parse(include_str!("../tests/fixtures/rusty-theme.md"));
+        for kind in [
+            Kind::Heading(1),
+            Kind::List,
+            Kind::Quote,
+            Kind::Code,
+            Kind::Table,
+        ] {
+            assert!(doc.blocks.iter().any(|block| block.kind == kind));
+        }
+        let runs: Vec<_> = doc.blocks.iter().flat_map(|block| &block.runs).collect();
+        assert!(runs.iter().any(|run| run.style.bold));
+        assert!(runs.iter().any(|run| run.style.italic));
+        assert!(runs.iter().any(|run| run.style.code));
+        assert!(runs.iter().any(|run| run.style.link.is_some()));
+        assert!(doc.blocks.iter().any(|block| block.text.contains("구리빛")));
+        assert!(doc.blocks.last().unwrap().text.contains("final paragraph"));
+    }
+    #[test]
     fn utf8_bom_does_not_turn_heading_into_plain_text() {
         let doc = Document::parse("\u{feff}# Heading\n\n한국어");
         assert_eq!(doc.blocks[0].kind, Kind::Heading(1));
