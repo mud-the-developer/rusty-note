@@ -54,22 +54,39 @@ fn mixed_fixture_source_splice_checkpoint_reopen_and_original_isolation() {
 
 #[test]
 fn unsupported_projection_leaves_session_and_complete_surrounding_source_unchanged() {
-    let root = isolated();
-    let source = include_str!("fixtures/inline-edit.md");
-    let path = root.join("original.md");
-    fs::write(&path, source).unwrap();
-    let session = Session::create(&path, &root.join("drafts")).unwrap();
-    let unsupported = source.split("\n\n").last().unwrap().trim_end_matches('\n');
-    assert!(Projection::parse(unsupported).is_err());
-    assert_eq!(session.text(), source);
-    let paragraph = source.split("\n\n").nth(2).unwrap();
-    let p = Projection::parse(paragraph).unwrap();
-    assert!(
-        p.edit(
-            &p.text
-                .replace("bold words and italic words", "cross-style replacement")
-        )
-        .is_err()
-    );
-    assert_eq!(session.text(), source);
+    let fixture = include_str!("fixtures/inline-edit.md").replace("\r\n", "\n");
+    for source in [fixture.clone(), fixture.replace('\n', "\r\n")] {
+        let root = isolated();
+        let path = root.join("original.md");
+        fs::write(&path, &source).unwrap();
+        let session = Session::create(&path, &root.join("drafts")).unwrap();
+        let document = rusty_note::document::Document::parse(&source);
+        let unsupported = document
+            .blocks
+            .iter()
+            .find(|block| block.text.contains("literal"))
+            .unwrap()
+            .paragraph_source
+            .clone()
+            .unwrap();
+        assert!(Projection::parse(&source[unsupported]).is_err());
+        let range = document
+            .blocks
+            .iter()
+            .find(|block| block.text.starts_with("Plain text,"))
+            .unwrap()
+            .paragraph_source
+            .clone()
+            .unwrap();
+        let p = Projection::parse(&source[range]).unwrap();
+        assert!(
+            p.edit(
+                &p.text
+                    .replace("bold words and italic words", "cross-style replacement")
+            )
+            .is_err()
+        );
+        assert_eq!(session.text(), source);
+        assert_eq!(fs::read_to_string(&path).unwrap(), source);
+    }
 }

@@ -1,6 +1,10 @@
 # Changelog
 
-## 1.0.0 — editable native Markdown sticky notes
+## 1.0.1 — first published editable native Markdown sticky notes
+
+The unpublished `v1.0.0` tag stopped at a Windows CI fixture test that assumed LF
+checkout. This patch makes that test use parsed source ranges and explicitly
+exercises LF/CRLF. The original tag is retained; no v1.0.0 binary was published.
 
 - Make rendered-text editing the default, retaining `--read-only` and advanced
   `--editor` source modes. Native RichEdit edits paragraphs, ATX headings and simple

@@ -1,4 +1,4 @@
-# v1.0.0 scope and post-v1 plan
+# v1.0.1 scope and post-v1 plan
 
 The operator requested a fast first v1 with **essential validation only**. Heavy
 stress, broad optimization, mixed-DPI and soak work are explicitly deferred until
@@ -29,7 +29,7 @@ after v1. Do not describe that deferred work as a completed pass.
   edit/style/newline/task/undo/recovery/Save/backup/image/new-note workflows.
 - [x] Source-integrity and conflict/recovery boundary regressions retained.
 - [x] Inspect final owned-window captures and record real brief CPU/memory/paints.
-- [ ] Review intended diff, commit/tag/push v1.0.0, check CI and release metadata.
+- [ ] Review intended diff, commit/tag/push v1.0.1, check CI and release metadata (v1.0.0 tag was unpublished).
 - [ ] Download the actual zip, verify SHA256/four packaged files, and run the same
   short smoke against the downloaded executable.
 

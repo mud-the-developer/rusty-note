@@ -1,6 +1,6 @@
 # Rusty Note
 
-**Rusty Note v1.0.0** is a small, native **editable Markdown sticky note** for
+**Rusty Note v1.0.1** is a small, native **editable Markdown sticky note** for
 Windows 10/11 x64. Click rendered text to edit it in place, keep a note above other
 windows, check tasks and enlarge local images. No browser, WebView, Electron,
 JavaScript runtime or GPUI framework.

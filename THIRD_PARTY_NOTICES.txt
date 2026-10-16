@@ -1,11 +1,11 @@
-THIRD-PARTY NOTICES - Rusty Note 1.0.0
+THIRD-PARTY NOTICES - Rusty Note 1.0.1
 
 Inventory: Cargo.lock non-development Windows x64 dependency graph, including
 build-time dependencies conservatively. The main project license is in LICENSE.
 Declared SPDX expressions are upstream metadata, not a new licensing grant.
 Upstream license, copyright and notice files follow. Identical texts are included
 once and referenced by section; all license files found for each package are listed.
-Cargo.lock SHA256: bdd9104fea80c6e662d1f1e1e3467958953cf1329631e8ec86eed6290cd545bd
+Cargo.lock SHA256: 08a0226ba086a24086191d27cc1e4fd24eabcb0f70f91b352692f77a9ccbe33d
 
 aho-corasick 1.1.5
   Declared license: Unlicense OR MIT

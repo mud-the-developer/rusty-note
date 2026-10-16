@@ -1,4 +1,4 @@
-# v1.0.0 — essential validation
+# v1.0.1 — essential validation
 
 The operator explicitly chose a quick first v1 with essential checks, then further
 validation/iteration after publication. No stress matrix, mixed-DPI/soak exercise or
@@ -51,6 +51,11 @@ Literal 1.5-second idle observations after the small new-note flow:
 
 These short local samples are not budget, GPU-memory, foreground-caret or stress
 compliance. Native caret/compositor work is not completely counted by WM_PAINT.
+
+The first `v1.0.0` tag stopped in CI at a fixture-selection test that assumed LF
+checkout. No artifact was published. The test now uses parser source ranges and
+exercises LF/CRLF; the existing tag is preserved and the first published v1 is
+`v1.0.1`. This was a test-portability fix, not a runtime feature change.
 
 ## Distribution check
 
