@@ -50,7 +50,7 @@ function Capture([IntPtr]$hwnd,[string]$path){$r=New-Object StickerProbe+RECT;if
 foreach($theme in @('dark','light')){
  $state=Join-Path $out "$theme-state.json";$metrics=Join-Path $out "$theme-metrics.json"
  [IO.File]::WriteAllText($state,'{"x":32000,"y":32000,"width":1600,"height":1600,"pinned":true}')
- $argv=@(('"'+$md+'"'),'--smoke-drop-file',('"'+$dropMd+'"'),'--state-file',('"'+$state+'"'),'--metrics-file',('"'+$metrics+'"'))
+ $argv=@('--read-only',('"'+$md+'"'),'--smoke-drop-file',('"'+$dropMd+'"'),'--state-file',('"'+$state+'"'),'--metrics-file',('"'+$metrics+'"'))
  if($theme -eq 'light'){$argv+='--light'}
  $p=Start-Process -FilePath $exe -ArgumentList $argv -PassThru
  try{
@@ -187,7 +187,7 @@ $findMd=Join-Path $findOut 'Find.md';Copy-Item (Join-Path $root 'tests/fixtures/
 $findBefore=[IO.File]::ReadAllBytes($findMd)
 foreach($theme in @('dark','light')){
  $state=Join-Path $findOut "$theme-state.json";$metrics=Join-Path $findOut "$theme-metrics.json"
- $argv=@(('"'+$findMd+'"'),'--state-file',('"'+$state+'"'),'--metrics-file',('"'+$metrics+'"'))
+ $argv=@('--read-only',('"'+$findMd+'"'),'--state-file',('"'+$state+'"'),'--metrics-file',('"'+$metrics+'"'))
  if($theme -eq 'light'){$argv+='--light'}
  $p=Start-Process -FilePath $exe -ArgumentList $argv -PassThru
  try{
@@ -263,7 +263,7 @@ $tableMd=Join-Path $tableOut 'Alignment.md';Copy-Item (Join-Path $root 'tests/fi
 $tableBefore=[IO.File]::ReadAllBytes($tableMd)
 foreach($theme in @('dark','light')){
  $state=Join-Path $tableOut "$theme-state.json";$metrics=Join-Path $tableOut "$theme-metrics.json"
- $argv=@(('"'+$tableMd+'"'),'--state-file',('"'+$state+'"'),'--metrics-file',('"'+$metrics+'"'))
+ $argv=@('--read-only',('"'+$tableMd+'"'),'--state-file',('"'+$state+'"'),'--metrics-file',('"'+$metrics+'"'))
  if($theme -eq 'light'){$argv+='--light'}
  $p=Start-Process -FilePath $exe -ArgumentList $argv -PassThru
  try{

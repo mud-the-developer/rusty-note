@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.0.0 — editable native Markdown sticky notes
+
+- Make rendered-text editing the default, retaining `--read-only` and advanced
+  `--editor` source modes. Native RichEdit edits paragraphs, ATX headings and simple
+  list/task text in place, with immediate scene updates and bold/italic formatting.
+- Support empty text, selection replacement, literal punctuation, Enter/new
+  paragraphs and explicit new-note creation (+ / Ctrl+N).
+- Share working snapshots/checkpoints, pending-input recovery, bounded native/block
+  undo and task undo. Source writes remain explicit, with backups and detected
+  external-change refusal; unsupported input cannot silently save stale source.
+- Make checkboxes clickable and add an owned native local-image fit/zoom/pan view.
+- Retain bounded DirectWrite-measured Mermaid flowcharts and existing Markdown
+  rendering; no WebView or JavaScript runtime. Edited blocks use a Rust CommonMark
+  serializer, not a whole-document HTML conversion.
+- Include third-party license/notice texts in the portable Windows x64 package.
+- Use essential Cargo checks and short normal/narrow light/dark native workflow
+  smoke for this first v1. [Verification](docs/v1-validation.md).
+
+Windows x64 is unsigned. Advanced Markdown editing, physical IME/clipboard,
+accessibility, long-session/multi-instance and mixed-DPI coverage need more work.
+Heavy stress and broad optimization are explicitly deferred until after v1.
+No full Mermaid/Tinta compatibility or performance-budget claim is made.
+
 ## 0.3.7 — frosted-glass icon and warm themes
 
 - Refine the supplied pixel artwork into transparent PNG and eight-size Windows ICO assets.

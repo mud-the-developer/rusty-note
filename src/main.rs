@@ -13,9 +13,11 @@ fn main() {
     let mut options = Options {
         notes_dir: store::default_notes_dir(),
         state_file: base.join("RustyNote/sticker-state.json"),
+        inline_edit: true,
         ..Default::default()
     };
     let mut args = std::env::args().skip(1);
+    let mut explicit_mode: Option<String> = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--notes-dir" => {
@@ -40,7 +42,15 @@ fn main() {
                     args.next().expect("--metrics-file needs a path"),
                 ))
             }
-            "--editor" => options.editor_mode = true,
+            mode @ ("--editor" | "--inline-edit" | "--read-only") => {
+                if explicit_mode.as_deref().is_some_and(|old| old != mode) {
+                    eprintln!("Choose only one editor/view mode");
+                    std::process::exit(2);
+                }
+                explicit_mode = Some(mode.to_owned());
+                options.editor_mode = mode == "--editor";
+                options.inline_edit = mode == "--inline-edit";
+            }
             "--light" => options.light = true,
             "--reduced-motion" => options.reduced_motion = true,
             _ if !arg.starts_with('-') && options.file.is_none() => {
@@ -52,8 +62,12 @@ fn main() {
             }
         }
     }
-    if options.editor_mode && options.state_file == base.join("RustyNote/sticker-state.json") {
-        options.state_file = base.join("RustyNote/state.json");
+    if options.state_file == base.join("RustyNote/sticker-state.json") {
+        if options.editor_mode {
+            options.state_file = base.join("RustyNote/state.json");
+        } else if options.inline_edit {
+            options.state_file = base.join("RustyNote/inline-state.json");
+        }
     }
     if let Err(error) = native::run(options) {
         eprintln!("Rusty Note: {error}");

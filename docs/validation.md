@@ -60,7 +60,16 @@ checks remain optimistic against external writers, not transactional locking.
 
 ## Distribution
 
-Public https://github.com/mud-the-developer/rusty-note. Version tags rerun
-fmt/tests/Clippy/build and publish unsigned Windows x64 portable zip + SHA256SUMS
-as a pre-release. Downloaded release artifacts must be checksum-verified and run
-through the same native harness before reporting deployment verified.
+Public https://github.com/mud-the-developer/rusty-note. The v1 release workflow
+requires a version tag matching `Cargo.toml`, then packages an unsigned Windows x64
+portable zip and `SHA256SUMS.txt` after fmt, locked tests, warnings-denied Clippy and
+a locked Release build. Staging/output stays under ignored `out/`; the zip contains
+`rusty-note.exe`, `README.md`, `LICENSE` and reviewed `THIRD_PARTY_NOTICES.txt`.
+`v1.0.0` and other non-v0, non-hyphenated version tags publish as stable/latest;
+`v0.*` and hyphenated pre-release tags remain pre-releases.
+
+This historical baseline and CI publication do not verify a downloaded v1 artifact.
+The release owner must checksum-verify downloaded artifacts and run them through
+the native harness before reporting deployment verified. Further stress testing
+and optimization are deferred at the user's choice; large-document and mixed-DPI
+profiling remain incomplete, as detailed in the [repeat smoke record](stress-validation.md).

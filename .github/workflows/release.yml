@@ -16,20 +16,25 @@ jobs:
       - run: cargo test --locked
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo build --locked --release
-      - name: Package portable Windows binary
+      - name: Package portable Windows x64 release
         shell: pwsh
         run: |
           $version = '${{ github.ref_name }}'
           $cargoVersion = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"').Matches.Groups[1].Value
           if ($version -ne "v$cargoVersion") { throw 'Version tag does not match Cargo.toml' }
-          New-Item -ItemType Directory -Force dist/package | Out-Null
-          Copy-Item target/release/rusty-note.exe,README.md,LICENSE dist/package/
-          Compress-Archive -Path dist/package/* -DestinationPath "dist/rusty-note-$version-windows-x64.zip"
-          $hash = (Get-FileHash "dist/rusty-note-$version-windows-x64.zip" -Algorithm SHA256).Hash.ToLower()
-          "$hash  rusty-note-$version-windows-x64.zip" | Set-Content "dist/SHA256SUMS.txt" -Encoding ascii
-      - name: Publish pre-release
+          New-Item -ItemType Directory -Force out/package | Out-Null
+          Copy-Item target/release/rusty-note.exe,README.md,LICENSE,THIRD_PARTY_NOTICES.txt out/package/
+          Compress-Archive -Path out/package/* -DestinationPath "out/rusty-note-$version-windows-x64.zip"
+          $hash = (Get-FileHash "out/rusty-note-$version-windows-x64.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  rusty-note-$version-windows-x64.zip" | Set-Content "out/SHA256SUMS.txt" -Encoding ascii
+      - name: Publish stable release or pre-release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create '${{ github.ref_name }}' dist/*.zip dist/SHA256SUMS.txt --title 'Rusty Note ${{ github.ref_name }}' --prerelease --generate-notes
+          $version = '${{ github.ref_name }}'
+          $releaseFlags = @('--latest')
+          if ($version -like 'v0.*' -or $version.Contains('-')) {
+            $releaseFlags = @('--prerelease', '--latest=false')
+          }
+          gh release create $version out/*.zip out/SHA256SUMS.txt --title "Rusty Note $version" --generate-notes @releaseFlags

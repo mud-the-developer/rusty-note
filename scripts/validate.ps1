@@ -173,7 +173,7 @@ foreach($theme in @('dark','light')) {
     $before=[Convert]::ToBase64String([IO.File]::ReadAllBytes($md))
     $state=Join-Path $notes 'state.json';$metrics=Join-Path $notes 'metrics.json'
     [IO.File]::WriteAllText($state,'{"x":120,"y":100,"width":600,"height":760,"pinned":false}')
-    $argv=@(('"'+$md+'"'),'--state-file',('"'+$state+'"'),'--metrics-file',('"'+$metrics+'"'),'--reduced-motion')
+    $argv=@('--read-only',('"'+$md+'"'),'--state-file',('"'+$state+'"'),'--metrics-file',('"'+$metrics+'"'),'--reduced-motion')
     if($theme -eq 'light'){$argv+='--light'}
     $p=Start-Process -FilePath $exe -ArgumentList $argv -PassThru
     try {

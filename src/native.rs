@@ -29,6 +29,9 @@ use windows::{
 };
 use windows_numerics::Vector2;
 
+#[path = "native_inline.rs"]
+mod inline_host;
+
 #[derive(Default)]
 pub struct Options {
     pub notes_dir: PathBuf,
@@ -39,6 +42,7 @@ pub struct Options {
     pub reduced_motion: bool,
     pub explicit_notes_dir: bool,
     pub editor_mode: bool,
+    pub inline_edit: bool,
     pub file: Option<PathBuf>,
     pub smoke_drop_file: Option<PathBuf>,
 }
@@ -138,6 +142,8 @@ struct App {
     paints: u64,
     error: Option<String>,
     editor: Option<crate::editor::Editor>,
+    inline: inline_host::InlineState,
+    image_popup: Option<HWND>,
     images: crate::images::Images,
     library_scroll: usize,
     tray_available: bool,
@@ -149,6 +155,12 @@ struct App {
 impl App {
     unsafe fn new(mut options: Options) -> Result<Self> {
         unsafe {
+            if options.editor_mode && options.inline_edit {
+                return Err(windows::core::Error::new(
+                    E_INVALIDARG,
+                    "--inline-edit cannot be combined with --editor",
+                ));
+            }
             let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
             let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
             let fonts = Fonts {
@@ -156,7 +168,19 @@ impl App {
                 formats: RefCell::new(HashMap::new()),
                 measurements: Cell::new(0),
             };
-            let mut state = State::load(&options.state_file);
+            let mut state_problem = None;
+            let mut state = match State::load_checked(&options.state_file) {
+                Ok(state) => state,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => State::default(),
+                Err(error) => {
+                    if options.inline_edit {
+                        state_problem = Some(format!(
+                            "State/recovery association needs review; editing blocked and file retained: {error}"
+                        ));
+                    }
+                    State::default()
+                }
+            };
             if !options.editor_mode && !options.state_file.exists() {
                 state.width = 360;
                 state.height = 500;
@@ -181,8 +205,25 @@ impl App {
                 (Vec::new(), None)
             };
             if !options.editor_mode {
-                let initial = options.file.clone().or_else(|| state.selected.clone());
+                let initial = options
+                    .file
+                    .clone()
+                    .or_else(|| state.selected.clone())
+                    .or_else(|| {
+                        options
+                            .inline_edit
+                            .then(|| {
+                                state
+                                    .inline_draft
+                                    .as_ref()
+                                    .map(|draft| draft.original.clone())
+                            })
+                            .flatten()
+                    });
                 if let Some(path) = initial {
+                    if options.inline_edit {
+                        options.file = Some(path.clone());
+                    }
                     match crate::viewer::open(&path) {
                         Ok((note, _)) => {
                             options.notes_dir = note.path.parent().unwrap().to_owned();
@@ -224,7 +265,7 @@ impl App {
             };
             let mut motion = Motion::default();
             motion.reduced = options.reduced_motion;
-            Ok(Self {
+            let mut app = Self {
                 hwnd: HWND::default(),
                 factory,
                 target: None,
@@ -245,6 +286,8 @@ impl App {
                 scroll_drag: None,
                 paints: 0,
                 editor: None,
+                inline: inline_host::InlineState::default(),
+                image_popup: None,
                 images: crate::images::Images::new()?,
                 library_scroll: 0,
                 tray_available: false,
@@ -253,7 +296,14 @@ impl App {
                 search_hits: Vec::new(),
                 search_index: 0,
                 error,
-            })
+            };
+            if let Some(error) = state_problem {
+                app.inline.blocked = true;
+                app.error = Some(error);
+            } else {
+                app.restore_inline_note();
+            }
+            Ok(app)
         }
     }
     unsafe fn resources(&mut self) -> Result<()> {
@@ -305,7 +355,10 @@ impl App {
             .iter()
             .enumerate()
             {
-                if !self.options.editor_mode && [1, 2].contains(&i) {
+                if !self.options.editor_mode
+                    && [1, 2].contains(&i)
+                    && !(self.options.inline_edit && i == 2)
+                {
                     continue;
                 }
                 let width = if !self.options.editor_mode && i == 0 {
@@ -338,6 +391,7 @@ impl App {
         }
         self.scroll =
             crate::viewer::reload_scroll(self.scroll, self.scene.height, self.height - 160.0);
+        self.position_inline();
     }
     fn reading_hint(&self) -> &str {
         if self.options.editor_mode {
@@ -348,6 +402,7 @@ impl App {
             3 => "Always on top  ·  P",
             4 => "Light / dark theme  ·  T",
             5 => "Close this sticker",
+            _ if self.options.inline_edit => "CLICK TO EDIT · Ctrl+N new · Ctrl+S saves original",
             _ => "READ ONLY  ·  Ctrl+O OPEN  ·  F5 RELOAD",
         }
     }
@@ -487,6 +542,115 @@ impl App {
             Ok(())
         }
     }
+    unsafe fn draw_diagram(
+        &self,
+        diagram: &crate::layout::DiagramBox,
+        top: f32,
+        palette: &Palette,
+        alpha: f32,
+    ) -> Result<()> {
+        unsafe {
+            let target = self.target.as_ref().unwrap();
+            let brush = self.brush.as_ref().unwrap();
+            let point = |(x, y): (f32, f32)| Vector2 {
+                X: self.content_x() + x,
+                Y: top + y - self.scroll,
+            };
+            brush.SetColor(&color(palette.accent, alpha));
+            for arrow in &diagram.arrows {
+                for pair in arrow.points.windows(2) {
+                    target.DrawLine(point(pair[0]), point(pair[1]), brush, 1.5, None);
+                }
+                let a = arrow.points[2];
+                let b = arrow.points[3];
+                let length = (b.0 - a.0).hypot(b.1 - a.1).max(1.0);
+                let (dx, dy) = ((b.0 - a.0) / length, (b.1 - a.1) / length);
+                for side in [-1.0, 1.0] {
+                    target.DrawLine(
+                        point(b),
+                        point((
+                            b.0 - 7.0 * dx + side * 4.0 * dy,
+                            b.1 - 7.0 * dy - side * 4.0 * dx,
+                        )),
+                        brush,
+                        1.5,
+                        None,
+                    );
+                }
+            }
+            for node in &diagram.nodes {
+                let b = node.bounds;
+                let y = top + b.y - self.scroll;
+                if y + b.height < 106.0 || y > self.height - 46.0 {
+                    continue;
+                }
+                let bounds = rect(self.content_x() + b.x, y, b.width, b.height);
+                if node.shape == crate::diagram::Shape::Diamond {
+                    let geometry = self.factory.CreatePathGeometry()?;
+                    let sink = geometry.Open()?;
+                    sink.BeginFigure(
+                        Vector2 {
+                            X: bounds.left + b.width / 2.0,
+                            Y: bounds.top,
+                        },
+                        D2D1_FIGURE_BEGIN_FILLED,
+                    );
+                    sink.AddLines(&[
+                        Vector2 {
+                            X: bounds.right,
+                            Y: bounds.top + b.height / 2.0,
+                        },
+                        Vector2 {
+                            X: bounds.left + b.width / 2.0,
+                            Y: bounds.bottom,
+                        },
+                        Vector2 {
+                            X: bounds.left,
+                            Y: bounds.top + b.height / 2.0,
+                        },
+                    ]);
+                    sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+                    sink.Close()?;
+                    brush.SetColor(&color(palette.panel, alpha));
+                    target.FillGeometry(&geometry, brush, None);
+                    brush.SetColor(&color(palette.accent, alpha));
+                    target.DrawGeometry(&geometry, brush, 1.5, None);
+                } else {
+                    let radius = if node.shape == crate::diagram::Shape::Rounded {
+                        9.0
+                    } else {
+                        0.0
+                    };
+                    self.fill(bounds, radius, palette.panel, alpha);
+                    brush.SetColor(&color(palette.accent, alpha));
+                    target.DrawRoundedRectangle(
+                        &D2D1_ROUNDED_RECT {
+                            rect: bounds,
+                            radiusX: radius,
+                            radiusY: radius,
+                        },
+                        brush,
+                        1.5,
+                        None,
+                    );
+                }
+            }
+            for b in &diagram.labels {
+                self.fill(
+                    rect(
+                        self.content_x() + b.x,
+                        top + b.y - self.scroll,
+                        b.width,
+                        b.height,
+                    ),
+                    3.0,
+                    palette.card,
+                    alpha,
+                );
+            }
+            Ok(())
+        }
+    }
     unsafe fn render(&mut self) -> Result<()> {
         unsafe {
             self.resources()?;
@@ -539,7 +703,7 @@ impl App {
                 "RUSTY NOTE",
                 tiny,
                 rect(
-                    if self.options.editor_mode {
+                    if self.options.editor_mode || self.options.inline_edit {
                         126.0
                     } else {
                         82.0
@@ -605,7 +769,10 @@ impl App {
                 (self.width - 78.0, "◐", self.state.light),
                 (self.width - 42.0, "×", false),
             ] {
-                if !self.options.editor_mode && (48.0..116.0).contains(&x) {
+                if !self.options.editor_mode
+                    && (48.0..116.0).contains(&x)
+                    && !(self.options.inline_edit && x == 86.0)
+                {
                     continue;
                 }
                 let open_button = !self.options.editor_mode && x == 12.0;
@@ -787,7 +954,34 @@ impl App {
                     progress,
                 )?;
             }
+            for diagram in &self.scene.diagrams {
+                self.draw_diagram(diagram, top, &palette, progress)?;
+            }
+            let inline_origins = self.inline_origins();
             for (line_index, line) in self.scene.lines.iter().enumerate() {
+                if inline_origins.contains(&line.origin) {
+                    if line.source_start == 0
+                        && let Some((_, prefix, width)) = self
+                            .scene
+                            .edit_prefixes
+                            .iter()
+                            .find(|(origin, _, _)| *origin == line.origin)
+                    {
+                        self.text(
+                            prefix,
+                            line.font,
+                            rect(
+                                content_x + line.x,
+                                top + line.y - self.scroll,
+                                *width + 2.0,
+                                line.height + 4.0,
+                            ),
+                            palette.ink,
+                            progress,
+                        )?;
+                    }
+                    continue;
+                }
                 let y = top + line.y - self.scroll;
                 if y + line.height < 106.0 || y > self.height - 46.0 {
                     continue;
@@ -856,10 +1050,28 @@ impl App {
                 );
             }
             target.PopAxisAlignedClip();
-            let size_hint = format!(
-                "READ ONLY  ·  {}%  ·  Ctrl+wheel zoom",
-                (self.state.zoom * 100.0).round() as u32
-            );
+            let size_hint = if self.options.inline_edit {
+                let state = if self
+                    .inline
+                    .control
+                    .as_ref()
+                    .is_some_and(crate::inline::Paragraph::composing)
+                {
+                    "COMPOSING · draft checkpoint only"
+                } else if self.inline.note.as_ref().is_some_and(|note| note.pending()) {
+                    "INPUT RETAINED · repair before Save"
+                } else if self.inline.note.as_ref().is_some_and(|note| note.dirty()) {
+                    "WORKING DRAFT · Ctrl+S saves original"
+                } else {
+                    "CLICK TO EDIT · Ctrl+N new · Ctrl+S save"
+                };
+                format!("{state} · {}%", (self.state.zoom * 100.0).round() as u32)
+            } else {
+                format!(
+                    "READ ONLY  ·  {}%  ·  Ctrl+wheel zoom",
+                    (self.state.zoom * 100.0).round() as u32
+                )
+            };
             let find_status = if self.search_hits.is_empty() {
                 "Find: no results  ·  Ctrl+F change  ·  Esc clear".to_owned()
             } else {
@@ -876,7 +1088,11 @@ impl App {
             };
             self.text(
                 if self.error.is_some() {
-                    "Read error  ·  click for details  ·  F5 retry"
+                    if self.options.inline_edit {
+                        "Draft / Save details · click status"
+                    } else {
+                        "Read error  ·  click for details  ·  F5 retry"
+                    }
                 } else if !self.search_query.is_empty() {
                     &find_status
                 } else if !self.options.editor_mode && self.hover_region(self.hover) == -1 {
@@ -925,6 +1141,9 @@ impl App {
         }
     }
     fn open_markdown(&mut self, path: PathBuf, explicit_open: bool) {
+        if self.options.inline_edit && !self.prepare_inline_open(&path, explicit_open) {
+            return;
+        }
         match crate::viewer::open(&path) {
             Ok((note, text)) => {
                 let same_file = self.options.file.as_ref() == Some(&note.path);
@@ -957,6 +1176,7 @@ impl App {
                     self.height - 160.0,
                 );
                 self.error = None;
+                self.restore_inline_note();
                 unsafe {
                     let title: Vec<u16> = format!("Rusty Note — {}", self.notes[0].title)
                         .encode_utf16()
@@ -989,12 +1209,8 @@ impl App {
         let previous_scroll = self.scroll;
         self.state.zoom = zoom;
         self.scene = Scene::with_zoom(&Document::parse(source), &self.fonts, zoom);
+        self.scroll = previous_scroll * zoom / old;
         self.reflow();
-        self.scroll = crate::viewer::reload_scroll(
-            previous_scroll * zoom / old,
-            self.scene.height,
-            self.height - 160.0,
-        );
         unsafe {
             let _ = InvalidateRect(Some(self.hwnd), None, false);
         }
@@ -1027,7 +1243,7 @@ impl App {
         }
     }
     fn begin_find(&mut self) {
-        if self.options.editor_mode {
+        if self.options.editor_mode || (self.options.inline_edit && !self.end_inline_paragraph()) {
             return;
         }
         if let Some(query) = crate::prompt::ask(self.hwnd, "Find in Markdown", &self.search_query) {
@@ -1105,6 +1321,7 @@ impl App {
                         continue;
                     }
                     if !self.options.editor_mode
+                        && !(self.options.inline_edit && [201, 202].contains(&id))
                         && ![204, 205, 206, 207, 211, 212, 213, 214, 215, 216, 217, 218]
                             .contains(&id)
                     {
@@ -1117,6 +1334,9 @@ impl App {
                     };
                     let wide: Vec<u16> = label.encode_utf16().chain([0]).collect();
                     let _ = AppendMenuW(menu, MF_STRING, id, PCWSTR(wide.as_ptr()));
+                }
+                if self.options.inline_edit && self.state.inline_draft.is_some() {
+                    let _ = AppendMenuW(menu, MF_STRING, 219, w!("Discard active draft…"));
                 }
                 let mut point = POINT::default();
                 let _ = GetCursorPos(&mut point);
@@ -1266,6 +1486,8 @@ impl App {
                     } else {
                         self.start_edit();
                     }
+                } else if self.options.inline_edit && (86.0..116.0).contains(&x) {
+                    self.new_inline_note();
                 } else if self.options.editor_mode && (86.0..116.0).contains(&x) {
                     self.new_note();
                 } else if x > self.width - 42.0 {
@@ -1294,6 +1516,17 @@ impl App {
                 self.show_error();
             } else if self.library && x < 160.0 && y >= 112.0 {
                 self.select(self.library_scroll + ((y - 112.0) / 48.0) as usize);
+            } else if self.open_image_at(x, y) {
+                // The owned image window handled this click.
+            } else if self.options.inline_edit
+                && y >= 106.0
+                && y <= self.height - 46.0
+                && x >= self.content_x()
+                && x < self.width - 28.0
+            {
+                if !self.toggle_inline_task(x, y) {
+                    self.start_inline_at(x, y);
+                }
             } else if let Some(url) = self.link_at(x, y) {
                 crate::desktop::open_link(self.hwnd, url);
             }
@@ -1404,11 +1637,21 @@ impl App {
             let layout=self.line_layout(line).ok()?;let mut metrics=DWRITE_TEXT_METRICS::default();layout.GetMetrics(&mut metrics).ok()?;
             Some(serde_json::json!({"line":index,"origin":line.origin,"x":self.content_x()+line.x,"y":116.0+line.y-self.scroll,"height":line.height,"box_width":layout.GetMaxWidth(),"ink_left":metrics.left,"ink_width":metrics.width,"alignment":format!("{:?}",line.alignment),"linked":line.runs.iter().any(|r|r.style.link.is_some())}))
         }).collect();
-        serde_json::json!({"table_geometry":table_geometry,"backend":"Direct2D + DirectWrite", "layout":"gpui-pretext 0.6.2", "notes":self.notes.len(),
+        let diagram_geometry: Vec<_> = self.scene.lines.iter().filter(|l| l.kind == Kind::Diagram).filter_map(|line| unsafe {
+            let layout = self.line_layout(line).ok()?;
+            let mut metrics = DWRITE_TEXT_METRICS::default();
+            layout.GetMetrics(&mut metrics).ok()?;
+            Some(serde_json::json!({"x":line.x,"y":line.y,"box_width":layout.GetMaxWidth(),"ink_width":metrics.widthIncludingTrailingWhitespace,"ink_height":metrics.height,"height":line.height,"font_size":line.font.size}))
+        }).collect();
+        let diagram_nodes: Vec<_> = self.scene.diagrams.iter().flat_map(|d| &d.nodes).map(|n| {
+            let b = n.bounds;
+            serde_json::json!({"x":b.x,"y":b.y,"width":b.width,"height":b.height,"shape":format!("{:?}",n.shape)})
+        }).collect();
+        serde_json::json!({"image_open":self.image_popup.is_some_and(crate::image_viewer::is_view),"inline":self.inline_metrics(),"diagram_prepared":self.scene.diagram_prepared,"diagram_rendered":self.scene.diagrams.len(),"diagram_nodes":diagram_nodes,"diagram_arrows":self.scene.diagrams.iter().map(|d|d.arrows.len()).sum::<usize>(),"diagram_geometry":diagram_geometry,"table_geometry":table_geometry,"backend":"Direct2D + DirectWrite", "layout":"gpui-pretext 0.6.2", "notes":self.notes.len(),
             "font_measurements":self.fonts.measurements.get(),"prepare_blocks":self.scene.prepare_passes,
             "layout_passes":self.scene.layout_passes,"paint_count":self.paints,"animation_active":self.motion.active(),
             "lines":self.scene.lines.len(),"width_dip":self.width,"height_dip":self.height,
-            "selected":self.notes.get(self.selected).map(|n| &n.title),"read_only":!self.options.editor_mode,"scroll":self.scroll,"pinned":self.state.pinned,"light":self.state.light,"hint":self.reading_hint(),"scroll_thumb_top":crate::viewer::Scrollbar::new(self.scene.height,self.height).map(|bar|bar.thumb_top(self.scroll)),"scroll_thumb_size":crate::viewer::Scrollbar::new(self.scene.height,self.height).map(|bar|bar.thumb),"scale":self.scale,"zoom":self.state.zoom,"find_count":self.search_hits.len(),"find_index":self.search_index,"find_active":!self.search_query.is_empty(),"error":self.error,"table_cells":self.scene.cells.len(),"images":self.scene.images.len(),"styled_runs":self.scene.lines.iter().map(|l|l.runs.iter().filter(|r|r.style.bold||r.style.italic||r.style.code||r.style.link.is_some()||r.style.strike).count()).sum::<usize>()})
+            "selected":self.notes.get(self.selected).map(|n| &n.title),"read_only":!self.options.editor_mode && !self.options.inline_edit,"scroll":self.scroll,"pinned":self.state.pinned,"light":self.state.light,"hint":self.reading_hint(),"scroll_thumb_top":crate::viewer::Scrollbar::new(self.scene.height,self.height).map(|bar|bar.thumb_top(self.scroll)),"scroll_thumb_size":crate::viewer::Scrollbar::new(self.scene.height,self.height).map(|bar|bar.thumb),"scale":self.scale,"zoom":self.state.zoom,"find_count":self.search_hits.len(),"find_index":self.search_index,"find_active":!self.search_query.is_empty(),"error":self.error,"table_cells":self.scene.cells.len(),"images":self.scene.images.len(),"styled_runs":self.scene.lines.iter().map(|l|l.runs.iter().filter(|r|r.style.bold||r.style.italic||r.style.code||r.style.link.is_some()||r.style.strike).count()).sum::<usize>()})
     }
 }
 
@@ -1424,6 +1667,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
             return DefWindowProcW(hwnd, msg, w, l);
         }
         let Ok(mut app) = (*ptr).try_borrow_mut() else {
+            // A modal owner dialog holds App; a reentrant close must not destroy it.
+            if msg == WM_CLOSE {
+                return LRESULT(0);
+            }
             return DefWindowProcW(hwnd, msg, w, l);
         };
         match msg {
@@ -1435,6 +1682,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                     eprintln!("render: {error}");
                 }
                 let _ = EndPaint(hwnd, &paint);
+                app.queue_inline_paint();
                 LRESULT(0)
             }
             WM_SIZE => {
@@ -1547,7 +1795,11 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                 } else if x > right - 6.0 {
                     HTRIGHT
                 } else if y < 45.0
-                    && x > if app.options.editor_mode { 120.0 } else { 76.0 }
+                    && x > if app.options.editor_mode || app.options.inline_edit {
+                        120.0
+                    } else {
+                        76.0
+                    }
                     && x < right - 118.0
                 {
                     HTCAPTION
@@ -1666,6 +1918,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
             WM_KEYDOWN => {
                 match w.0 as u16 {
                     0x1b => {
+                        if app.options.inline_edit && app.inline.control.is_some() {
+                            app.end_inline_paragraph();
+                            return LRESULT(0);
+                        }
                         if !app.options.editor_mode {
                             app.clear_find();
                             return LRESULT(0);
@@ -1737,8 +1993,26 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                 }
                 LRESULT(0)
             }
+            inline_host::SYNC => {
+                if w.0 == 2 || w.0 == 3 {
+                    app.toggle_inline_style(w.0 == 2);
+                } else {
+                    app.sync_inline();
+                }
+                LRESULT(0)
+            }
+            inline_host::PAINT => {
+                app.repaint_inline_child();
+                LRESULT(0)
+            }
+            inline_host::PROBE if app.options.inline_edit && app.options.metrics_file.is_some() => {
+                app.inline_probe(w.0, l.0);
+                LRESULT(0)
+            }
             WM_TIMER => {
-                if w.0 == 1 {
+                if w.0 == inline_host::CHECKPOINT {
+                    app.checkpoint_inline();
+                } else if w.0 == 1 {
                     let (_, active) = app.motion.sample();
                     if !active {
                         let _ = KillTimer(Some(hwnd), 1);
@@ -1793,6 +2067,37 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
             }
             WM_COMMAND => {
                 let command = w.0 & 0xffff;
+                if command == inline_host::CONTROL_ID {
+                    // EN_UPDATE during paint must not invalidate the parent again.
+                    if w.0 >> 16 == 0x0300 {
+                        let _ = PostMessageW(Some(hwnd), inline_host::SYNC, WPARAM(0), LPARAM(0));
+                    }
+                    return LRESULT(0);
+                }
+                if app.options.inline_edit && command == 202 {
+                    app.new_inline_note();
+                    return LRESULT(0);
+                }
+                if app.options.inline_edit && command == 230 {
+                    app.undo_inline(false);
+                    return LRESULT(0);
+                }
+                if app.options.inline_edit && command == 231 {
+                    app.undo_inline(true);
+                    return LRESULT(0);
+                }
+                if app.options.inline_edit && command == 201 {
+                    app.save_inline();
+                    return LRESULT(0);
+                }
+                if app.options.inline_edit && command == 219 {
+                    app.confirm_discard_inline();
+                    return LRESULT(0);
+                }
+                if app.options.inline_edit && command == 220 {
+                    app.end_inline_paragraph();
+                    return LRESULT(0);
+                }
                 if !app.options.editor_mode
                     && [200, 201, 202, 203, 208, 209, 210].contains(&command)
                 {
@@ -1906,7 +2211,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                 LRESULT(0)
             }
             WM_CLOSE => {
-                if !app.finish_edit() {
+                if !app.leave_inline(true) || !app.finish_edit() {
                     return LRESULT(0);
                 }
                 app.persist();
@@ -2026,6 +2331,7 @@ pub fn run(options: Options) -> Result<()> {
             let wide: Vec<u16> = title.encode_utf16().chain([0]).collect();
             let _ = SetWindowTextW(hwnd, PCWSTR(wide.as_ptr()));
             app.reflow();
+            app.restore_inline_control();
             app.animate();
             if app.options.smoke_output.is_some() {
                 SetTimer(Some(hwnd), 2, 1400, None);
@@ -2078,6 +2384,8 @@ pub fn run(options: Options) -> Result<()> {
             }
             if message.message == WM_KEYDOWN && GetKeyState(0x11) < 0 {
                 let command = match message.wParam.0 {
+                    0x5a if (*ptr).borrow().options.inline_edit => Some(230),
+                    0x59 if (*ptr).borrow().options.inline_edit => Some(231),
                     0x46 => Some(215),
                     0x45 => Some(200),
                     0x53 => Some(201),
@@ -2100,5 +2408,61 @@ pub fn run(options: Options) -> Result<()> {
         }
         CoUninitialize();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn mermaid_uses_directwrite_and_keeps_literal_fallback_at_narrow_width() {
+        let fonts = Fonts {
+            factory: unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).unwrap() },
+            formats: RefCell::new(HashMap::new()),
+            measurements: Cell::new(0),
+        };
+        let source = "graph TD\n    A-->B\n    click A \"https://example.com/never-opened\"\n";
+        let mut scene = Scene::new(
+            &Document::parse(&format!("```mermaid\n{source}```\n")),
+            &fonts,
+        );
+        assert!(fonts.measurements.get() > 0);
+        for width in [530.0, 290.0, 48.0] {
+            let calls = fonts.measurements.get();
+            scene.reflow(width);
+            assert_eq!(fonts.measurements.get(), calls);
+            let visible: String = scene
+                .lines
+                .iter()
+                .flat_map(|l| l.text.chars())
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            let expected: String = source.chars().filter(|c| !c.is_whitespace()).collect();
+            assert_eq!(visible, expected);
+            for line in &scene.lines {
+                assert!(
+                    fonts.width(&line.text, line.font) <= f64::from(line.layout_width) + 0.75,
+                    "{}: cached {}, actual {}",
+                    line.text,
+                    line.layout_width,
+                    fonts.width(&line.text, line.font)
+                );
+            }
+        }
+        let doc = Document::parse(include_str!("../tests/fixtures/mermaid.md"));
+        for zoom in [1.0, 1.4] {
+            let mut scene = Scene::with_zoom(&doc, &fonts, zoom);
+            for width in [530.0, 290.0] {
+                let calls = fonts.measurements.get();
+                scene.reflow(width);
+                assert_eq!(fonts.measurements.get(), calls);
+                assert!(scene.diagrams.len() >= 3);
+                for line in scene.lines.iter().filter(|l| l.kind == Kind::Diagram) {
+                    assert!(
+                        fonts.width(&line.text, line.font) <= f64::from(line.layout_width) + 0.75
+                    );
+                }
+            }
+        }
     }
 }

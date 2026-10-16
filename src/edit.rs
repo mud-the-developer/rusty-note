@@ -11,16 +11,20 @@ pub fn read_note(path: &Path) -> io::Result<String> {
     fs::File::open(path)?
         .take(MAX_NOTE_BYTES + 1)
         .read_to_string(&mut text)?;
+    validate_note(&text)?;
+    Ok(text)
+}
+pub(crate) fn validate_note(text: &str) -> io::Result<()> {
     if text.len() as u64 > MAX_NOTE_BYTES || text.contains('\0') {
         return Err(io::Error::other(
             "Unsupported note: exceeds 2 MiB or contains NUL bytes",
         ));
     }
-    Ok(text)
+    Ok(())
 }
-struct SaveLock(PathBuf);
+pub(crate) struct SaveLock(PathBuf);
 impl SaveLock {
-    fn acquire(path: &Path) -> io::Result<Self> {
+    pub(crate) fn acquire(path: &Path) -> io::Result<Self> {
         let lock = path.with_extension("md.rusty-lock");
         OpenOptions::new()
             .create_new(true)
@@ -38,6 +42,47 @@ impl Drop for SaveLock {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
     }
+}
+/// Commit exact UTF-8 source, without newline conversion. An error means replacement
+/// did not complete; no fallible work follows the rename. Cooperating writers use
+/// SaveLock; the final content check is still optimistic for other writers.
+pub(crate) fn save_source(path: &Path, original: &str, saved: &str) -> io::Result<bool> {
+    validate_note(saved)?;
+    let _lock = SaveLock::acquire(path)?;
+    let current = read_note(path)?;
+    if current != original {
+        return Err(io::Error::other(
+            "File changed outside Rusty Note. Save was blocked; copy your edits before reloading.",
+        ));
+    }
+    if saved == original {
+        return Ok(false);
+    }
+    let backup = path.with_extension("md.bak");
+    let mut backup_file = fs::File::create(&backup)?;
+    backup_file.write_all(current.as_bytes())?;
+    backup_file.sync_all()?;
+    drop(backup_file);
+    let temporary = path.with_extension(format!("md.{}.tmp", std::process::id()));
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    if let Err(error) = (|| {
+        output.write_all(saved.as_bytes())?;
+        output.sync_all()?;
+        drop(output);
+        if read_note(path)? != original {
+            return Err(io::Error::other(
+                "File changed during Save; replacement blocked",
+            ));
+        }
+        fs::rename(&temporary, path)
+    })() {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    Ok(true)
 }
 #[derive(Debug)]
 pub struct EditBuffer {
@@ -58,47 +103,17 @@ impl EditBuffer {
         self.text != self.original.replace("\r\n", "\n")
     }
     pub fn save(&mut self) -> io::Result<()> {
-        if self.text.len() as u64 > MAX_NOTE_BYTES {
-            return Err(io::Error::other("Note exceeds 2 MiB"));
-        }
-        let _lock = SaveLock::acquire(&self.path)?;
-        let current = read_note(&self.path)?;
-        if current != self.original {
-            return Err(io::Error::other(
-                "File changed outside Rusty Note. Save was blocked; copy your edits before reloading.",
-            ));
-        }
-        if !self.dirty() {
-            return Ok(());
-        }
-        let backup = self.path.with_extension("md.bak");
-        fs::write(&backup, current.as_bytes())?;
-        let temporary = self
-            .path
-            .with_extension(format!("md.{}.tmp", std::process::id()));
-        let saved = if self.original.contains("\r\n") {
+        validate_note(&self.text)?;
+        // The source editor intentionally normalizes newlines on an actual edit,
+        // but a no-op Save must keep even mixed endings byte-for-byte unchanged.
+        let saved = if !self.dirty() {
+            self.original.clone()
+        } else if self.original.contains("\r\n") {
             self.text.replace("\r\n", "\n").replace('\n', "\r\n")
         } else {
             self.text.clone()
         };
-        let mut output = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
-        if let Err(error) = (|| {
-            output.write_all(saved.as_bytes())?;
-            output.sync_all()?;
-            drop(output);
-            if read_note(&self.path)? != self.original {
-                return Err(io::Error::other(
-                    "File changed during Save; replacement blocked",
-                ));
-            }
-            fs::rename(&temporary, &self.path)
-        })() {
-            let _ = fs::remove_file(&temporary);
-            return Err(error);
-        }
+        save_source(&self.path, &self.original, &saved)?;
         self.original = saved;
         Ok(())
     }
@@ -122,10 +137,21 @@ pub fn create_note(directory: &Path) -> io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn test_root(name: &str) -> PathBuf {
+        let time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "target/v1-m1/tests/edit-{name}-{}-{time:x}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
     #[test]
     fn saves_keep_backup_and_reject_external_changes() {
-        let root = std::env::temp_dir().join(format!("rusty-note-edit-{}", std::process::id()));
-        fs::create_dir_all(&root).unwrap();
+        let root = test_root("save");
         let path = root.join("safe.md");
         fs::write(&path, "# Old\n한국어").unwrap();
         let mut buffer = EditBuffer::open(&path).unwrap();
@@ -143,8 +169,7 @@ mod tests {
     }
     #[test]
     fn crlf_is_not_dirty_and_is_preserved_on_save() {
-        let root = std::env::temp_dir().join(format!("rusty-note-crlf-{}", std::process::id()));
-        fs::create_dir_all(&root).unwrap();
+        let root = test_root("crlf");
         let path = root.join("crlf.md");
         fs::write(&path, "# Old\r\n\r\nText\r\n").unwrap();
         let mut buffer = EditBuffer::open(&path).unwrap();
@@ -160,8 +185,7 @@ mod tests {
     }
     #[test]
     fn bounded_reads_reject_binary_and_oversize_notes() {
-        let root = std::env::temp_dir().join(format!("rusty-bounded-{}", std::process::id()));
-        fs::create_dir_all(&root).unwrap();
+        let root = test_root("bounded");
         let path = root.join("bounded.md");
         fs::write(&path, b"bad\0note").unwrap();
         assert!(read_note(&path).is_err());
@@ -171,8 +195,7 @@ mod tests {
     }
     #[test]
     fn existing_save_lock_does_not_change_note_or_backup() {
-        let root = std::env::temp_dir().join(format!("rusty-lock-{}", std::process::id()));
-        fs::create_dir_all(&root).unwrap();
+        let root = test_root("lock");
         let path = root.join("locked.md");
         fs::write(&path, "original").unwrap();
         fs::write(path.with_extension("md.rusty-lock"), "").unwrap();
@@ -185,8 +208,7 @@ mod tests {
     }
     #[test]
     fn new_notes_never_replace_existing_files() {
-        let root = std::env::temp_dir().join(format!("rusty-note-new-{}", std::process::id()));
-        fs::create_dir_all(&root).unwrap();
+        let root = test_root("new");
         fs::write(root.join("Note-001.md"), "keep").unwrap();
         let path = create_note(&root).unwrap();
         assert_ne!(path.file_name().unwrap(), "Note-001.md");
